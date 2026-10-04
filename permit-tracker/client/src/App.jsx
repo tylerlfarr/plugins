@@ -30,6 +30,7 @@ export default function App() {
   const [milestones, setMilestones] = useState([]);
   const [officialIds, setOfficialIds] = useState([]);
   const [history, setHistory] = useState([]);
+  const [readiness, setReadiness] = useState(null);
   const [attention, setAttention] = useState([]);
   const [bulk, setBulk] = useState({ internal_status: '', owner: '' });
   const [message, setMessage] = useState('');
@@ -72,6 +73,21 @@ export default function App() {
     setMilestones(data.milestones);
     setOfficialIds(data.officialIds);
     setHistory(data.history);
+    setReadiness(data.readiness || null);
+  }
+
+  function readinessClass(state) {
+    if (state === 'ready') return 'live';
+    if (state === 'blocked') return 'danger';
+    if (state === 'needs_verification') return 'warn';
+    return '';
+  }
+
+  function readinessLabel(state) {
+    if (state === 'ready') return 'Ready';
+    if (state === 'blocked') return 'Blocked';
+    if (state === 'needs_verification') return 'Needs verification';
+    return state || '—';
   }
 
   useEffect(() => {
@@ -302,6 +318,9 @@ export default function App() {
         <div className="banner">
           {stats.sections} sections · {stats.lotGroups} lot groups · {stats.permits} permits ·{' '}
           {stats.withIds} with IDs · {stats.officialIds} extracted IDs · {stats.attention} attention
+          {stats.readiness
+            ? ` · Ready ${stats.readiness.ready} / Blocked ${stats.readiness.blocked} / Needs verification ${stats.readiness.needs_verification}`
+            : ''}
         </div>
       ) : null}
       {message ? <div className="banner">{message}</div> : null}
@@ -335,6 +354,28 @@ export default function App() {
               <option value="needs_followup">needs_followup</option>
               <option value="done">done</option>
             </select>
+            <select
+              value={filters.readiness_state || ''}
+              onChange={(e) => setFilters((f) => ({ ...f, readiness_state: e.target.value }))}
+            >
+              <option value="">Lot readiness</option>
+              <option value="ready">Ready</option>
+              <option value="blocked">Blocked</option>
+              <option value="needs_verification">Needs verification</option>
+            </select>
+            <label className="muted">
+              <input
+                type="checkbox"
+                checked={filters.approaching_start === 'true'}
+                onChange={(e) =>
+                  setFilters((f) => ({
+                    ...f,
+                    approaching_start: e.target.checked ? 'true' : '',
+                  }))
+                }
+              />{' '}
+              Approaching start
+            </label>
             <label className="muted">
               <input
                 type="checkbox"
@@ -422,6 +463,7 @@ export default function App() {
                     <th onClick={() => toggleSort('community_name')}>Community / Lot</th>
                     <th onClick={() => toggleSort('primary_official_id')}>Official IDs</th>
                     <th onClick={() => toggleSort('official_status')}>Official</th>
+                    <th onClick={() => toggleSort('readiness_state')}>Lot readiness</th>
                     <th onClick={() => toggleSort('internal_status')}>Internal</th>
                     <th>Check</th>
                   </tr>
@@ -454,6 +496,11 @@ export default function App() {
                         <div className="muted">
                           Lot {p.lot_label}
                           {p.housetype ? ` · ${p.housetype}` : ''}
+                          {p.target_start
+                            ? ` · start ${p.target_start}${
+                                p.days_to_start != null ? ` (${p.days_to_start}d)` : ''
+                              }`
+                            : ''}
                         </div>
                       </td>
                       <td>
@@ -472,8 +519,17 @@ export default function App() {
                         <div className="muted mono">{p.source_native_status || '—'}</div>
                       </td>
                       <td>
+                        <span className={`pill ${readinessClass(p.readiness_state)}`}>
+                          {readinessLabel(p.readiness_state)}
+                        </span>
+                        <div className="muted">
+                          {(p.readiness_summary || '').slice(0, 80)}
+                          {(p.readiness_summary || '').length > 80 ? '…' : ''}
+                        </div>
+                      </td>
+                      <td>
                         <div>{p.internal_status}</div>
-                        <div className="muted">{p.readiness_state || ''} · {p.owner}</div>
+                        <div className="muted">{p.owner || '—'}</div>
                       </td>
                       <td>
                         <div>{p.last_check_outcome}</div>
@@ -518,6 +574,68 @@ export default function App() {
                       <textarea rows={3} readOnly value={detail.notes_raw || ''} />
                     </div>
                   </div>
+                  {readiness ? (
+                    <>
+                      <h3>Lot readiness (configured rules)</h3>
+                      <p className="muted">
+                        Operational assessment — missing evidence is never Ready. {readiness.assessment_note}
+                      </p>
+                      <div>
+                        <span className={`pill ${readinessClass(readiness.state)}`}>
+                          {readiness.state_label || readinessLabel(readiness.state)}
+                        </span>
+                        {readiness.target_start ? (
+                          <span className="muted">
+                            {' '}
+                            · Target start {readiness.target_start}
+                            {readiness.days_to_start != null
+                              ? ` (${readiness.days_to_start}d)`
+                              : ''}
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="muted">{readiness.summary}</div>
+                      {readiness.outstanding?.length ? (
+                        <>
+                          <strong>Outstanding</strong>
+                          <ul className="history">
+                            {readiness.outstanding.map((o) => (
+                              <li key={`${o.id}-${o.key || o.label}`}>
+                                {o.label}: {o.detail || o.status}
+                                {o.value ? <span className="mono"> · {o.value}</span> : ''}
+                              </li>
+                            ))}
+                          </ul>
+                        </>
+                      ) : null}
+                      {readiness.gaps?.length ? (
+                        <>
+                          <strong>Needs verification / gaps</strong>
+                          <ul className="history">
+                            {readiness.gaps.map((g) => (
+                              <li key={`${g.id}-${g.key || g.label}`}>
+                                {g.label}: {g.detail || g.status}
+                              </li>
+                            ))}
+                          </ul>
+                        </>
+                      ) : null}
+                      {readiness.satisfied?.length ? (
+                        <>
+                          <strong>Satisfied</strong>
+                          <ul className="history">
+                            {readiness.satisfied.slice(0, 8).map((s) => (
+                              <li key={`${s.id}-${s.key || s.label}`}>
+                                {s.label}
+                                {s.value ? <span className="mono"> · {s.value}</span> : ''}
+                                <span className="muted"> · {s.status}</span>
+                              </li>
+                            ))}
+                          </ul>
+                        </>
+                      ) : null}
+                    </>
+                  ) : null}
                   <h3>Official IDs extracted</h3>
                   <ul className="history">
                     {officialIds.map((o) => (
@@ -579,8 +697,9 @@ export default function App() {
         <div className="panel stack">
           <h2>Attention — morning meeting</h2>
           <p className="muted">
-            Separate clocks: no progress (progress_anchor), source missing/failed checks, unresolved
-            matching, overdue internal actions. Successful checks do not reset the progress clock.
+            Approaching starts, readiness blockers, needs-verification gaps, revision impact
+            (review — not auto-invalidation), official changes, overdue actions, unresolved matching,
+            and no-progress (progress_anchor). Successful checks do not reset the progress clock.
           </p>
           {schedule ? (
             <div className="attention-item">

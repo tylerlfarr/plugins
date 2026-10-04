@@ -9,6 +9,7 @@ import {
   isFairfaxCountyQueryCandidate,
 } from './ids.js';
 import { confirmJurisdictionFromHeaders, ARCHIVED_SHEETS } from './importProfile.js';
+import { rebuildAllReadiness } from './readiness.js';
 
 export { extractOfficialIds, normalizeOfficialId, suggestJurisdictionFromId, stableLotKey };
 
@@ -759,6 +760,9 @@ export function commitWorkbookParse(parsed, { changedBy, replaceSecondary = true
     'source_workbook',
     JSON.stringify(summary)
   );
+  // Recompute lot-readiness after import (milestones + revisions changed)
+  const readiness = rebuildAllReadiness();
+  summary.readiness = readiness.counts;
   return summary;
 }
 

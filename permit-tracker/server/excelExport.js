@@ -21,6 +21,11 @@ export function exportCoexistenceXlsx() {
          p.jurisdiction_source,
          p.jurisdiction_confirmed,
          p.readiness_state,
+         ra.target_start,
+         ra.days_to_start,
+         ra.summary AS readiness_summary,
+         ra.outstanding_json,
+         ra.gaps_json,
          p.source_native_status,
          p.official_status,
          p.internal_status,
@@ -36,6 +41,7 @@ export function exportCoexistenceXlsx() {
        FROM permit_records p
        JOIN lot_groups lg ON lg.id = p.lot_group_id
        JOIN community_sections cs ON cs.id = lg.section_id
+       LEFT JOIN readiness_assessments ra ON ra.permit_record_id = p.id
        WHERE p.record_origin = 'import'
        ORDER BY cs.community_name, lg.lot_label, p.id`
     )
@@ -67,6 +73,23 @@ export function exportCoexistenceXlsx() {
       primary_official_id: r.primary_official_id,
       all_official_ids: ids.map((i) => i.official_id).join(' / '),
       readiness_state: r.readiness_state,
+      target_start: r.target_start,
+      days_to_start: r.days_to_start,
+      readiness_summary: r.readiness_summary,
+      outstanding_prereqs: (() => {
+        try {
+          return (JSON.parse(r.outstanding_json || '[]') || []).map((o) => o.label).join('; ');
+        } catch {
+          return '';
+        }
+      })(),
+      verification_gaps: (() => {
+        try {
+          return (JSON.parse(r.gaps_json || '[]') || []).map((g) => g.label).join('; ');
+        } catch {
+          return '';
+        }
+      })(),
       source_native_status: r.source_native_status,
       official_status: r.official_status,
       internal_status: r.internal_status,

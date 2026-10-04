@@ -9,6 +9,15 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
+function nearIso(daysFromNow) {
+  const d = new Date();
+  d.setUTCDate(d.getUTCDate() + daysFromNow);
+  const m = d.getUTCMonth() + 1;
+  const day = d.getUTCDate();
+  const y = String(d.getUTCFullYear()).slice(2);
+  return `${m}/${day}/${y}`;
+}
+
 export function buildSanitizedWorkbookBuffer() {
   const wb = XLSX.utils.book_new();
 
@@ -20,8 +29,8 @@ export function buildSanitizedWorkbookBuffer() {
     'Permit Release',
     'PW W/S Ordered',
     'PW W/S Received',
-    '',
-    '',
+    'Target Start Date',
+    'Water & Sewer Paid',
     '',
     '',
     '',
@@ -55,6 +64,7 @@ export function buildSanitizedWorkbookBuffer() {
     '',
     '',
   ]);
+  // Blocked: Received still APPLY; open revision; approaching target start
   pt.push([
     'Demo Community Alpha',
     '1-4',
@@ -62,8 +72,8 @@ export function buildSanitizedWorkbookBuffer() {
     '4/1/26',
     '4/2/26',
     'APPLY',
-    '',
-    '',
+    nearIso(10),
+    '4/5/26',
     '',
     '',
     '',
@@ -76,15 +86,16 @@ export function buildSanitizedWorkbookBuffer() {
     '',
     'ZNA2026-04510 / BLD2026-04765',
   ]);
+  // Ready under workbook rules (no official ID → no AHJ gap)
   pt.push([
     'Demo Community Alpha',
     '10',
     'Single B',
     '4/3/26',
-    '',
-    '',
-    '',
-    '',
+    '4/4/26',
+    '4/6/26',
+    nearIso(45),
+    '4/7/26',
     '',
     '',
     '',
@@ -104,7 +115,7 @@ export function buildSanitizedWorkbookBuffer() {
     'Permit',
     'LoCo Water Ordered',
     'LoCo Water Received',
-    '',
+    'Target Start Date',
     '',
     '',
     '',
@@ -139,6 +150,7 @@ export function buildSanitizedWorkbookBuffer() {
     '',
     '',
   ]);
+  // Workbook prereqs complete (na waived) but ID never live-checked → needs_verification
   pt.push([
     'Demo Cascades Block',
     '96-100',
@@ -146,7 +158,7 @@ export function buildSanitizedWorkbookBuffer() {
     '5/1/26',
     '5/2/26',
     'na',
-    '',
+    nearIso(5),
     '',
     '',
     '',
@@ -160,6 +172,7 @@ export function buildSanitizedWorkbookBuffer() {
     '',
     'BLDC-2026-040694',
   ]);
+  // Missing utility ordered/received → blocked
   pt.push([
     'Demo Cascades Block',
     '200',
@@ -167,7 +180,7 @@ export function buildSanitizedWorkbookBuffer() {
     '6/1/26',
     '',
     '',
-    '',
+    nearIso(60),
     '',
     '',
     '',

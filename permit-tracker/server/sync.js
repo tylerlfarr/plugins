@@ -7,6 +7,12 @@ import {
   isDemoMode,
 } from './db.js';
 import { checkPermit } from './connectors/index.js';
+import {
+  updateLotReadiness,
+  rebuildAllReadiness,
+  getStoredAssessment,
+  READINESS_STATES,
+} from './readiness.js';
 
 const OFFICIAL_DATE_FIELDS = [
   ['submittedDate', 'submitted_date'],
@@ -223,28 +229,9 @@ export function applyConnectorResult(permit, result, changedBy = 'connector', qu
   return { outcome, mode: result.mode, fieldAvailability: result.fieldAvailability, baseline: establishingBaseline };
 }
 
+/** Lot-readiness under configured workbook rules (not silent official-status Ready). */
 export function updateReadiness(permitId) {
-  const p = db.prepare('SELECT * FROM permit_records WHERE id = ?').get(permitId);
-  if (!p) return;
-  let state = 'unknown_stale';
-  if (p.last_check_outcome === 'failed' || p.last_check_outcome === 'unavailable') {
-    state = 'waiting';
-  } else if (p.official_status === 'issued' || p.official_status === 'approved') {
-    state = 'verified_ready';
-  } else if (['revision_required', 'cancelled'].includes(p.official_status)) {
-    state = 'verified_blocked';
-  } else if (p.official_status === 'in_review' || p.official_status === 'accepted') {
-    state = 'waiting';
-  } else if (
-    db.prepare(`SELECT COUNT(*) AS c FROM match_reviews WHERE status = 'pending' AND candidate_official_id = ?`).get(
-      p.primary_official_id || ''
-    ).c > 0
-  ) {
-    state = 'decision_required';
-  } else if (!p.primary_official_id) {
-    state = 'decision_required';
-  }
-  db.prepare(`UPDATE permit_records SET readiness_state = ? WHERE id = ?`).run(state, permitId);
+  return updateLotReadiness(permitId);
 }
 
 export async function syncPermitById(id, { forceFail = false, officialId, allowSynthetic } = {}) {
@@ -345,6 +332,9 @@ export function rebuildAttention() {
   const today = new Date();
   const isoToday = today.toISOString().slice(0, 10);
 
+  // Refresh lot-readiness assessments first (prereqs, revisions, automation gaps)
+  rebuildAllReadiness({ today });
+
   const permits = db
     .prepare(
       `SELECT p.*, lg.lot_label, cs.community_name, cs.project_code
@@ -398,6 +388,101 @@ export function rebuildAttention() {
       }
     } else {
       resolveAttentionByCondition(`jur:${p.id}`);
+    }
+
+    const assessment = getStoredAssessment(p.id);
+    const stateLabel =
+      assessment?.state === READINESS_STATES.READY
+        ? 'Ready'
+        : assessment?.state === READINESS_STATES.BLOCKED
+          ? 'Blocked'
+          : assessment?.state === READINESS_STATES.NEEDS_VERIFICATION
+            ? 'Needs verification'
+            : assessment?.state || 'unknown';
+    const approaching =
+      assessment &&
+      assessment.target_start &&
+      assessment.days_to_start != null &&
+      assessment.days_to_start >= 0 &&
+      assessment.days_to_start <= Number(getSetting('approaching_start_days', '45'));
+
+    if (approaching && assessment.state !== READINESS_STATES.READY) {
+      upsertAttention(
+        p.id,
+        'approaching_start',
+        `Target start ${assessment.target_start} in ${assessment.days_to_start}d — ${stateLabel}: ${
+          (assessment.outstanding || []).map((o) => o.label).slice(0, 3).join(', ') ||
+          (assessment.gaps || []).map((g) => g.label).slice(0, 2).join(', ') ||
+          'review readiness'
+        }`,
+        `approach:${p.id}:${assessment.target_start}`,
+        `approach:${p.id}`
+      );
+    } else {
+      resolveAttentionByCondition(`approach:${p.id}`);
+    }
+
+    if (assessment?.state === READINESS_STATES.BLOCKED) {
+      const labels = (assessment.outstanding || []).map((o) => o.label).slice(0, 4);
+      upsertAttention(
+        p.id,
+        'readiness_blocked',
+        `Blocked under workbook rules: ${labels.join(', ') || assessment.summary}`,
+        `blocked:${p.id}:${labels.join('|')}`,
+        `blocked:${p.id}`
+      );
+    } else {
+      resolveAttentionByCondition(`blocked:${p.id}`);
+    }
+
+    if (assessment?.state === READINESS_STATES.NEEDS_VERIFICATION) {
+      const labels = (assessment.gaps || []).map((g) => g.label).slice(0, 4);
+      upsertAttention(
+        p.id,
+        'needs_verification',
+        `Needs verification: ${labels.join(', ') || assessment.summary}`,
+        `verify:${p.id}:${labels.join('|')}`,
+        `verify:${p.id}`
+      );
+    } else {
+      resolveAttentionByCondition(`verify:${p.id}`);
+    }
+
+    const revGaps = (assessment?.gaps || []).filter((g) => String(g.id || '').startsWith('revision:'));
+    if (revGaps.length) {
+      upsertAttention(
+        p.id,
+        'revision_impact',
+        `Open permit revision may affect this lot — review (do not auto-invalidate): ${revGaps
+          .map((g) => g.detail)
+          .join('; ')}`,
+        `revimpact:${p.id}`,
+        `revimpact:${p.id}`
+      );
+    } else {
+      resolveAttentionByCondition(`revimpact:${p.id}`);
+    }
+
+    // Subsequent official changes (not baseline) in last 48h
+    const recentChange = db
+      .prepare(
+        `SELECT field, old_value, new_value, created_at FROM field_changes
+         WHERE permit_record_id = ? AND source = 'connector'
+           AND field IN ('official_status', 'source_native_status')
+           AND created_at >= datetime('now', '-2 days')
+         ORDER BY id DESC LIMIT 1`
+      )
+      .get(p.id);
+    if (recentChange) {
+      upsertAttention(
+        p.id,
+        'official_change',
+        `Official change: ${recentChange.field} ${recentChange.old_value || '∅'} → ${recentChange.new_value || '∅'}`,
+        `ochg:${p.id}:${recentChange.field}:${recentChange.new_value}`,
+        `ochg:${p.id}`
+      );
+    } else {
+      resolveAttentionByCondition(`ochg:${p.id}`);
     }
   }
 }

@@ -294,6 +294,20 @@ export function migrate() {
       status TEXT NOT NULL DEFAULT 'needs_review',
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS readiness_assessments (
+      permit_record_id INTEGER PRIMARY KEY REFERENCES permit_records(id) ON DELETE CASCADE,
+      state TEXT NOT NULL,
+      target_start TEXT,
+      days_to_start INTEGER,
+      summary TEXT NOT NULL DEFAULT '',
+      outstanding_json TEXT NOT NULL DEFAULT '[]',
+      satisfied_json TEXT NOT NULL DEFAULT '[]',
+      gaps_json TEXT NOT NULL DEFAULT '[]',
+      informational_json TEXT NOT NULL DEFAULT '[]',
+      ruleset_key TEXT NOT NULL DEFAULT 'default_workbook_v1',
+      assessed_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   // Additive migrations for existing DBs

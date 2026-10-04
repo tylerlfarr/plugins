@@ -27,18 +27,21 @@ Default candidates (first hit wins):
 ## Tests
 
 ```bash
-npm test                 # offline integrity + discovery + optional live workbook
+npm test                 # offline integrity + discovery + readiness + optional live workbook
 npm run test:live        # Fairfax controlled demo + coverage (network)
 npm run coverage:report  # import-origin coverage only (excludes demo/fixtures/injected)
 npm run investigate:idless
 npm run demo:fairfax-attention   # labeled "live lookup + controlled change-detection test"
+npm run demo:lot-readiness       # Ready/Blocked/Needs verification morning demo
+npm run demo:lot-readiness:source
 npm run fixture:build
 ```
 
 Offline tests never require the private workbook, Cursor-only paths, or network.  
 Optional workbook tests skip cleanly when the source xlsx is absent.
 
-UI: Permits · Attention · Import · **Sources** (Connect a location + registry + ArcGIS inspect) · Connectors.
+UI: Permits · Attention · Import · **Sources** (Connect a location + registry + ArcGIS inspect) · Connectors.  
+Lot readiness: Ready / Blocked / Needs verification under configurable workbook rules.
 
 ## Environment
 

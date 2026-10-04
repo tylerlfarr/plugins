@@ -13,6 +13,15 @@ import {
   getSchedulePreview,
 } from './sync.js';
 import {
+  getReadinessRuleset,
+  setReadinessRuleset,
+  assessPermitReadiness,
+  getStoredAssessment,
+  rebuildAllReadiness,
+  updateLotReadiness,
+  DEFAULT_RULESET,
+} from './readiness.js';
+import {
   parseWorkbookBuffer,
   commitWorkbookParse,
   importWorkbookFile,
@@ -65,12 +74,15 @@ app.get('/api/health', (_req, res) => {
 });
 
 app.get('/api/meta', (_req, res) => {
+  const rules = getReadinessRuleset();
   res.json({
     user: currentUser(),
     staleDays: Number(getSetting('stale_days', '14')),
+    approachingStartDays: Number(rules.approachingStartDays || 21),
     demoMode: getSetting('demo_mode', '0') === '1',
     connectors: listConnectors(),
     fairfaxFieldAvailability: FAIRFAX_FIELD_AVAILABILITY,
+    readinessRulesetKey: rules.key,
     productPromise:
       'Automatically run specific permit checks for communities/lots, preserve internal spreadsheet workflow, show what changed before morning meeting.',
     importProfile: 'source workbook (employer-specific mapping separate from reusable core)',
@@ -111,6 +123,8 @@ app.get('/api/permits', (req, res) => {
     jurisdiction_code,
     official_status,
     internal_status,
+    readiness_state,
+    approaching_start,
     has_official_id,
     fairfax_shaped,
     include_demo,
@@ -123,12 +137,21 @@ app.get('/api/permits', (req, res) => {
     'lot_label',
     'official_status',
     'internal_status',
+    'readiness_state',
     'next_action_due',
     'primary_official_id',
   ]);
   const sortCol = allowed.has(String(sort)) ? String(sort) : 'updated_at';
   const sortDir = String(dir).toLowerCase() === 'asc' ? 'ASC' : 'DESC';
-  let sql = `${PERMIT_SQL} WHERE 1=1`;
+  let sql = `SELECT p.*,
+    lg.lot_label, lg.housetype, lg.notes_raw, lg.section_id,
+    cs.project_code, cs.community_name, cs.permit_time_note, cs.jurisdiction_code AS section_jurisdiction,
+    ra.target_start AS target_start, ra.days_to_start AS days_to_start, ra.summary AS readiness_summary
+    FROM permit_records p
+    JOIN lot_groups lg ON lg.id = p.lot_group_id
+    JOIN community_sections cs ON cs.id = lg.section_id
+    LEFT JOIN readiness_assessments ra ON ra.permit_record_id = p.id
+    WHERE 1=1`;
   const params = [];
   if (include_demo !== 'true') {
     sql += ` AND p.record_origin = 'import'`;
@@ -154,6 +177,15 @@ app.get('/api/permits', (req, res) => {
     sql += ' AND p.internal_status = ?';
     params.push(internal_status);
   }
+  if (readiness_state) {
+    sql += ' AND p.readiness_state = ?';
+    params.push(readiness_state);
+  }
+  if (approaching_start === 'true') {
+    sql += ` AND ra.target_start IS NOT NULL AND ra.days_to_start IS NOT NULL
+             AND ra.days_to_start >= 0 AND ra.days_to_start <= ?`;
+    params.push(Number(getReadinessRuleset().approachingStartDays || 45));
+  }
   if (has_official_id === 'true') {
     sql += ` AND p.primary_official_id IS NOT NULL AND p.primary_official_id != ''`;
   }
@@ -165,12 +197,44 @@ app.get('/api/permits', (req, res) => {
       OR p.primary_official_id GLOB 'BLDC-*'
     )`;
   }
-  sql += ` ORDER BY ${sortCol} ${sortDir}, p.id ASC`;
+  const sortExpr =
+    sortCol === 'community_name'
+      ? 'cs.community_name'
+      : sortCol === 'lot_label'
+        ? 'lg.lot_label'
+        : `p.${sortCol}`;
+  sql += ` ORDER BY ${sortExpr} ${sortDir}, p.id ASC`;
   const permits = db.prepare(sql).all(...params).map((p) => ({
     ...p,
     fairfax_shaped: p.primary_official_id ? isFairfaxShapedId(p.primary_official_id) : false,
   }));
   res.json({ permits });
+});
+
+app.get('/api/readiness/rules', (_req, res) => {
+  res.json({ ruleset: getReadinessRuleset(), defaults: DEFAULT_RULESET });
+});
+
+app.put('/api/readiness/rules', (req, res) => {
+  const body = req.body || {};
+  const next = setReadinessRuleset({
+    ...getReadinessRuleset(),
+    ...body,
+    approachingStartDays:
+      body.approachingStartDays != null
+        ? Number(body.approachingStartDays)
+        : getReadinessRuleset().approachingStartDays,
+  });
+  setSetting('approaching_start_days', String(next.approachingStartDays || 45));
+  const rebuilt = rebuildAllReadiness();
+  rebuildAttention();
+  res.json({ ruleset: next, counts: rebuilt.counts });
+});
+
+app.post('/api/readiness/rebuild', (_req, res) => {
+  const rebuilt = rebuildAllReadiness();
+  rebuildAttention();
+  res.json(rebuilt.counts);
 });
 
 app.get('/api/permits/:id', (req, res) => {
@@ -193,7 +257,9 @@ app.get('/api/permits/:id', (req, res) => {
        WHERE permit_record_id = ? ORDER BY checked_at DESC LIMIT 20`
     )
     .all(permit.id);
-  res.json({ permit, milestones, officialIds, history, snapshots });
+  const readiness =
+    assessPermitReadiness(permit.id) || getStoredAssessment(permit.id) || null;
+  res.json({ permit, milestones, officialIds, history, snapshots, readiness });
 });
 
 app.patch('/api/permits/:id', (req, res) => {
@@ -244,9 +310,13 @@ app.patch('/api/permits/:id', (req, res) => {
       }
     }
   }
+  updateLotReadiness(permit.id);
   rebuildAttention();
   const updated = db.prepare(`${PERMIT_SQL} WHERE p.id = ?`).get(permit.id);
-  res.json({ permit: updated });
+  res.json({
+    permit: updated,
+    readiness: getStoredAssessment(permit.id) || assessPermitReadiness(permit.id),
+  });
 });
 
 app.post('/api/permits/bulk', (req, res) => {
@@ -643,6 +713,23 @@ app.get('/api/stats', (_req, res) => {
     demoPermits: db
       .prepare(`SELECT COUNT(*) AS c FROM permit_records WHERE record_origin != 'import'`)
       .get().c,
+    readiness: {
+      ready: db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM permit_records WHERE record_origin = 'import' AND readiness_state = 'ready'`
+        )
+        .get().c,
+      blocked: db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM permit_records WHERE record_origin = 'import' AND readiness_state = 'blocked'`
+        )
+        .get().c,
+      needs_verification: db
+        .prepare(
+          `SELECT COUNT(*) AS c FROM permit_records WHERE record_origin = 'import' AND readiness_state = 'needs_verification'`
+        )
+        .get().c,
+    },
   });
 });
 
