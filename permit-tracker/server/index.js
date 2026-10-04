@@ -1340,9 +1340,12 @@ export { app };
 
 if (process.env.PERMIT_NO_LISTEN !== '1') {
   const port = Number(process.env.PORT || 4173);
-  app.listen(port, () => {
+  // Bind all interfaces so Cursor desktop / port-forward surfaces can reach the process.
+  // Owner laptops still cannot use the VM's localhost — that requires open-desktop or a local run.
+  const host = process.env.LISTEN_HOST || '0.0.0.0';
+  app.listen(port, host, () => {
     console.log(
-      `Permit Ledger on http://localhost:${port} · auth=${authEnabled() ? 'on' : 'off'} · db=${getDbPath()}`
+      `Permit Ledger on http://${host}:${port} · auth=${authEnabled() ? 'on' : 'off'} · db=${getDbPath()}`
     );
   });
 }
