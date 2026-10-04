@@ -4,8 +4,19 @@ import { db } from './db.js';
 /**
  * Structured coexistence export (not a proven round-trip).
  * Import-origin records only — fixtures/demo probes excluded.
+ *
+ * Contact package defaults to confirmed only. Pass includeReviewedCandidates
+ * to also include reviewed candidates. Never includes rejected/outdated/sandbox/fixture.
+ * Provider export eligibility is separate from having an API token.
  */
-export function exportCoexistenceXlsx() {
+export function exportCoexistenceXlsx({
+  contactStatuses = ['confirmed'],
+  includeReviewedCandidates = false,
+} = {}) {
+  const statuses = includeReviewedCandidates
+    ? [...new Set([...contactStatuses, 'candidate'])]
+    : contactStatuses;
+
   const permitRows = db
     .prepare(
       `SELECT
@@ -59,7 +70,6 @@ export function exportCoexistenceXlsx() {
     const ids = idsStmt.all(r.permit_record_id);
     const mileObj = {};
     for (const m of milestones) {
-      // keep official_* and workbook milestone labels
       mileObj[m.label || m.key] = m.value;
     }
     return {
@@ -124,7 +134,7 @@ export function exportCoexistenceXlsx() {
   const masterfile = db.prepare('SELECT * FROM plan_tracker_rows ORDER BY id').all();
   const mst = db.prepare('SELECT * FROM mst_reference_ids ORDER BY id').all();
 
-  // Contacts export — never include sandbox_demo origins in operational package
+  const statusPlaceholders = statuses.map(() => '?').join(',');
   const contacts = db
     .prepare(
       `SELECT c.role, c.full_name, c.company, c.phone, c.email, c.mailing_address,
@@ -136,10 +146,12 @@ export function exportCoexistenceXlsx() {
        LEFT JOIN properties pr ON pr.id = c.property_id
        LEFT JOIN lot_groups lg ON lg.id = c.lot_group_id
        LEFT JOIN community_sections cs ON cs.id = lg.section_id
-       WHERE c.record_origin != 'sandbox_demo'
+       WHERE c.record_origin NOT IN ('sandbox_demo','local_fixture')
+         AND c.status IN (${statusPlaceholders})
+         AND c.status NOT IN ('rejected','outdated')
        ORDER BY c.id`
     )
-    .all();
+    .all(...statuses);
 
   const properties = db
     .prepare(
@@ -148,7 +160,7 @@ export function exportCoexistenceXlsx() {
        LEFT JOIN property_links pl ON pl.property_id = pr.id
        LEFT JOIN lot_groups lg ON lg.id = pl.lot_group_id
        LEFT JOIN community_sections cs ON cs.id = lg.section_id
-       WHERE pr.record_origin != 'sandbox_demo'
+       WHERE pr.record_origin NOT IN ('sandbox_demo','local_fixture')
        ORDER BY pr.id`
     )
     .all();
@@ -162,4 +174,18 @@ export function exportCoexistenceXlsx() {
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(properties), 'Properties');
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(contacts), 'Contacts');
   return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+}
+
+/** Parse export buffer and return sheet row counts + contact statuses for verification. */
+export function inspectExportBuffer(buf) {
+  const wb = XLSX.read(buf, { type: 'buffer' });
+  const contacts = XLSX.utils.sheet_to_json(wb.Sheets.Contacts || {});
+  return {
+    sheetNames: wb.SheetNames,
+    contactCount: contacts.length,
+    contactStatuses: [...new Set(contacts.map((c) => c.status))],
+    contactOrigins: [...new Set(contacts.map((c) => c.record_origin))],
+    contacts,
+    propertyCount: XLSX.utils.sheet_to_json(wb.Sheets.Properties || {}).length,
+  };
 }

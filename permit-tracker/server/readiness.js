@@ -261,7 +261,8 @@ function hasWaiver(permitId, milestoneKey) {
   return Boolean(
     db
       .prepare(
-        `SELECT id FROM milestone_waivers WHERE permit_record_id = ? AND milestone_key = ?`
+        `SELECT id FROM milestone_waivers
+         WHERE permit_record_id = ? AND milestone_key = ? AND revoked_at IS NULL`
       )
       .get(permitId, milestoneKey)
   );

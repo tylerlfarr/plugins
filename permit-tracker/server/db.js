@@ -320,6 +320,7 @@ export function migrate() {
       source TEXT NOT NULL DEFAULT 'manual',
       match_state TEXT NOT NULL DEFAULT 'unmatched',
       record_origin TEXT NOT NULL DEFAULT 'manual',
+      identity_key TEXT NOT NULL DEFAULT '',
       notes TEXT NOT NULL DEFAULT '',
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       updated_at TEXT NOT NULL DEFAULT (datetime('now'))
@@ -384,6 +385,8 @@ export function migrate() {
       validation_state TEXT NOT NULL DEFAULT 'provider_returned',
       status TEXT NOT NULL DEFAULT 'candidate',
       restriction_flags_json TEXT NOT NULL DEFAULT '[]',
+      phone_candidates_json TEXT NOT NULL DEFAULT '[]',
+      email_candidates_json TEXT NOT NULL DEFAULT '[]',
       record_origin TEXT NOT NULL DEFAULT 'manual',
       notes TEXT NOT NULL DEFAULT '',
       rejected_reason TEXT NOT NULL DEFAULT '',
@@ -394,7 +397,7 @@ export function migrate() {
     CREATE TABLE IF NOT EXISTS contact_jobs (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       provider TEXT NOT NULL DEFAULT 'tracerfy',
-      mode TEXT NOT NULL DEFAULT 'sandbox',
+      mode TEXT NOT NULL DEFAULT 'local_fixture',
       property_id INTEGER REFERENCES properties(id) ON DELETE SET NULL,
       permit_record_id INTEGER REFERENCES permit_records(id) ON DELETE SET NULL,
       lot_group_id INTEGER REFERENCES lot_groups(id) ON DELETE SET NULL,
@@ -402,6 +405,7 @@ export function migrate() {
       endpoint TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL DEFAULT 'queued',
       estimated_credits INTEGER NOT NULL DEFAULT 0,
+      reserved_credits INTEGER NOT NULL DEFAULT 0,
       actual_credits INTEGER NOT NULL DEFAULT 0,
       request_json TEXT NOT NULL DEFAULT '{}',
       response_json TEXT NOT NULL DEFAULT '{}',
@@ -419,6 +423,8 @@ export function migrate() {
       milestone_key TEXT NOT NULL,
       reason TEXT NOT NULL DEFAULT '',
       waived_by TEXT NOT NULL DEFAULT '',
+      revoked_at TEXT,
+      revoked_by TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       UNIQUE(permit_record_id, milestone_key)
     );
@@ -455,6 +461,7 @@ export function migrate() {
       mode TEXT NOT NULL,
       endpoint TEXT NOT NULL,
       credits INTEGER NOT NULL DEFAULT 0,
+      charge_kind TEXT NOT NULL DEFAULT 'actual',
       job_id INTEGER REFERENCES contact_jobs(id) ON DELETE SET NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
@@ -480,8 +487,16 @@ export function migrate() {
   addColumn('official_snapshots', 'is_baseline', 'is_baseline INTEGER NOT NULL DEFAULT 0');
   addColumn('attention_events', 'condition_key', 'condition_key TEXT');
   addColumn('attention_events', 'resolved_at', 'resolved_at TEXT');
+  addColumn('properties', 'identity_key', "identity_key TEXT NOT NULL DEFAULT ''");
+  addColumn('contacts', 'phone_candidates_json', "phone_candidates_json TEXT NOT NULL DEFAULT '[]'");
+  addColumn('contacts', 'email_candidates_json', "email_candidates_json TEXT NOT NULL DEFAULT '[]'");
+  addColumn('contact_jobs', 'reserved_credits', 'reserved_credits INTEGER NOT NULL DEFAULT 0');
+  addColumn('provider_usage', 'charge_kind', "charge_kind TEXT NOT NULL DEFAULT 'actual'");
+  addColumn('milestone_waivers', 'revoked_at', 'revoked_at TEXT');
+  addColumn('milestone_waivers', 'revoked_by', 'revoked_by TEXT');
 
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_lot_stable ON lot_groups(stable_key) WHERE stable_key != ''`);
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_property_identity ON properties(identity_key) WHERE identity_key != ''`);
   db.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS idx_permit_lot_official
       ON permit_records(lot_group_id, primary_official_id)

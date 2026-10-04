@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 
 async function api(path, options) {
   const res = await fetch(path, options);
@@ -35,14 +35,37 @@ export default function App() {
   const [contacts, setContacts] = useState([]);
   const [contactJobs, setContactJobs] = useState([]);
   const [tracerfy, setTracerfy] = useState(null);
+  const [selectedPropertyId, setSelectedPropertyId] = useState(null);
+  const detailRequestSeq = useRef(0);
   const [propertyForm, setPropertyForm] = useState({
+    id: null,
     site_address: '',
     city: '',
-    state: 'VA',
+    state: '',
     zip: '',
     parcel_apn: '',
     parcel_jurisdiction: '',
   });
+  const emptyPropertyForm = {
+    id: null,
+    site_address: '',
+    city: '',
+    state: '',
+    zip: '',
+    parcel_apn: '',
+    parcel_jurisdiction: '',
+  };
+  const [manualContact, setManualContact] = useState({
+    role: 'property_owner',
+    full_name: '',
+    company: '',
+    phone: '',
+    email: '',
+    mailing_address: '',
+  });
+  const [crosswalkPreview, setCrosswalkPreview] = useState(null);
+  const [crosswalkMissing, setCrosswalkMissing] = useState([]);
+  const [waiverForm, setWaiverForm] = useState({ milestone_key: '', reason: '' });
   const [attention, setAttention] = useState([]);
   const [bulk, setBulk] = useState({ internal_status: '', owner: '' });
   const [message, setMessage] = useState('');
@@ -79,8 +102,43 @@ export default function App() {
     setSavedFilters(f.filters);
   }
 
+  function applyPropertyToForm(prop) {
+    if (!prop) {
+      setPropertyForm({ ...emptyPropertyForm });
+      setSelectedPropertyId(null);
+      return;
+    }
+    setSelectedPropertyId(prop.id);
+    setPropertyForm({
+      id: prop.id,
+      site_address: prop.site_address || '',
+      city: prop.city || '',
+      state: prop.state || '',
+      zip: prop.zip || '',
+      parcel_apn: prop.parcel_apn || '',
+      parcel_jurisdiction: prop.parcel_jurisdiction || '',
+    });
+  }
+
   async function openDetail(id) {
+    const requestId = ++detailRequestSeq.current;
+    // Clear record-specific form state immediately to avoid carryover while loading
+    setPropertyForm({ ...emptyPropertyForm });
+    setSelectedPropertyId(null);
+    setContacts([]);
+    setContactJobs([]);
+    setProperties([]);
+    setManualContact({
+      role: 'property_owner',
+      full_name: '',
+      company: '',
+      phone: '',
+      email: '',
+      mailing_address: '',
+    });
     const data = await api(`/api/permits/${id}`);
+    // Ignore out-of-order responses
+    if (requestId !== detailRequestSeq.current) return;
     setDetail(data.permit);
     setMilestones(data.milestones);
     setOfficialIds(data.officialIds);
@@ -90,17 +148,14 @@ export default function App() {
     setContacts(data.contacts || []);
     setContactJobs(data.contactJobs || []);
     setTracerfy(data.tracerfy || null);
-    const confirmed = (data.properties || []).find((p) => p.link_state === 'confirmed');
-    const any = confirmed || (data.properties || [])[0];
-    if (any) {
-      setPropertyForm({
-        site_address: any.site_address || '',
-        city: any.city || '',
-        state: any.state || 'VA',
-        zip: any.zip || '',
-        parcel_apn: any.parcel_apn || '',
-        parcel_jurisdiction: any.parcel_jurisdiction || '',
-      });
+    const confirmed = (data.properties || []).filter((p) => p.link_state === 'confirmed');
+    // Default to confirmed only when unambiguous
+    if (confirmed.length === 1) {
+      applyPropertyToForm(confirmed[0]);
+    } else if ((data.properties || []).length === 1 && confirmed.length === 0) {
+      applyPropertyToForm(data.properties[0]);
+    } else {
+      applyPropertyToForm(null);
     }
   }
 
@@ -111,16 +166,19 @@ export default function App() {
     }
     setBusy(true);
     try {
-      await api('/api/properties', {
+      const body = {
+        ...propertyForm,
+        id: propertyForm.id || undefined,
+        lot_group_id: detail.lot_group_id,
+        permit_record_id: detail.id,
+        link_state: confirm ? 'confirmed' : 'candidate',
+      };
+      const result = await api('/api/properties', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ...propertyForm,
-          lot_group_id: detail.lot_group_id,
-          permit_record_id: detail.id,
-          link_state: confirm ? 'confirmed' : 'candidate',
-        }),
+        body: JSON.stringify(body),
       });
+      if (result.property?.id) setSelectedPropertyId(result.property.id);
       await openDetail(detail.id);
       setMessage(confirm ? 'Property confirmed for lot.' : 'Property saved as candidate.');
     } catch (e) {
@@ -130,11 +188,44 @@ export default function App() {
     }
   }
 
+  async function confirmSelectedProperty(prop) {
+    if (!detail || !prop) return;
+    setBusy(true);
+    try {
+      await api(`/api/properties/${prop.id}/confirm-link`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          lot_group_id: detail.lot_group_id,
+          permit_record_id: detail.id,
+        }),
+      });
+      applyPropertyToForm(prop);
+      await openDetail(detail.id);
+      setMessage(`Confirmed property ${prop.site_address || prop.parcel_apn}`);
+    } catch (e) {
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function selectedProperty() {
+    if (selectedPropertyId) {
+      return properties.find((p) => p.id === selectedPropertyId) || null;
+    }
+    return null;
+  }
+
   async function findContacts() {
     if (!detail) return;
-    const prop = properties[0];
+    const prop = selectedProperty();
     if (!prop) {
-      setMessage('Add/confirm a property address first.');
+      setMessage('Select/confirm the property that will be searched first.');
+      return;
+    }
+    if (prop.link_state !== 'confirmed') {
+      setMessage(`Confirm property before Find contacts (current link: ${prop.link_state}).`);
       return;
     }
     setBusy(true);
@@ -148,13 +239,193 @@ export default function App() {
           endpoint: 'instant_trace',
         }),
       });
-      setMessage(
-        result.isolation
-          ? `Find contacts: sandbox isolated (${result.isolation}). Production disabled.`
-          : `Find contacts: ${result.saved?.length || 0} candidates (est ${result.estimatedCredits} credits).`
-      );
+      const addr = result.searchedAddress
+        ? `${result.searchedAddress.site_address}, ${result.searchedAddress.city} ${result.searchedAddress.state} ${result.searchedAddress.zip}`
+        : prop.site_address;
+      if (result.error) {
+        setMessage(
+          `Find contacts failed (${result.provider?.mode || 'unknown'}): ${result.error.error || result.error.detail || JSON.stringify(result.error)} · searched ${addr}`
+        );
+      } else if (result.isolation) {
+        setMessage(
+          `Find contacts: ${result.provider?.mode} isolated (${result.isolation}). Searched ${addr}. No attach to operational workbook.`
+        );
+      } else if (result.deduped) {
+        setMessage(
+          `Find contacts: reused prior job #${result.job?.id} (${result.contacts?.length || 0} candidates). Searched ${addr}.`
+        );
+      } else {
+        setMessage(
+          `Find contacts: ${result.saved?.length || 0} candidates · mode ${result.provider?.mode} · est ${result.estimatedCredits ?? '—'} credits. Searched ${addr}.`
+        );
+      }
       await openDetail(detail.id);
       await refreshLists();
+    } catch (e) {
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveManualContact() {
+    if (!detail) return;
+    setBusy(true);
+    try {
+      await api('/api/contacts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...manualContact,
+          property_id: selectedPropertyId || undefined,
+          permit_record_id: detail.id,
+          lot_group_id: detail.lot_group_id,
+          status: 'confirmed',
+          record_origin: 'manual',
+        }),
+      });
+      setMessage('Manual contact saved.');
+      setManualContact({
+        role: 'property_owner',
+        full_name: '',
+        company: '',
+        phone: '',
+        email: '',
+        mailing_address: '',
+      });
+      await openDetail(detail.id);
+    } catch (e) {
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function setProviderMode(mode) {
+    setBusy(true);
+    try {
+      const data = await api('/api/contacts/provider-mode', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode }),
+      });
+      setTracerfy(data.tracerfy);
+      setMessage(`Provider mode: ${data.tracerfy.mode}`);
+    } catch (e) {
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function previewCrosswalkFile(file) {
+    setBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const data = await api('/api/property-crosswalk/preview', { method: 'POST', body: fd });
+      setCrosswalkPreview(
+        (data.preview || []).map((r) => ({
+          ...r,
+          selected: ['matched_stable_key', 'matched_project_lot'].includes(r.match_status),
+        }))
+      );
+      setMessage(`Crosswalk preview: ${data.rowCount} rows`);
+    } catch (e) {
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function commitCrosswalkSelected() {
+    if (!crosswalkPreview?.length) return;
+    setBusy(true);
+    try {
+      const data = await api('/api/property-crosswalk/commit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ rows: crosswalkPreview, confirmSelectedOnly: true }),
+      });
+      setMessage(
+        `Crosswalk commit: linked ${data.summary?.linked || 0}, created ${data.summary?.created || 0}, skipped ${data.summary?.skipped || 0}`
+      );
+      setCrosswalkMissing((await api('/api/property-crosswalk/missing')).rows || []);
+      await refreshLists();
+    } catch (e) {
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function offerOfficialAddress() {
+    if (!detail) return;
+    setBusy(true);
+    try {
+      const data = await api('/api/properties/offer-official-address', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ permit_record_id: detail.id }),
+      });
+      setMessage(
+        data.offered
+          ? `Official site address offered as candidate: ${data.property?.site_address}`
+          : `No official site address: ${data.reason}`
+      );
+      await openDetail(detail.id);
+    } catch (e) {
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function submitWaiver() {
+    if (!detail || !waiverForm.milestone_key || !waiverForm.reason) {
+      setMessage('Waiver needs milestone key + reason.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await api(`/api/milestones/${detail.id}/waiver`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(waiverForm),
+      });
+      setMessage(`Waiver recorded for ${waiverForm.milestone_key}`);
+      setWaiverForm({ milestone_key: '', reason: '' });
+      await openDetail(detail.id);
+      await refreshLists();
+    } catch (e) {
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function revokeWaiver(key) {
+    if (!detail) return;
+    await api(`/api/milestones/${detail.id}/waiver/revoke`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ milestone_key: key }),
+    });
+    await openDetail(detail.id);
+    await refreshLists();
+  }
+
+  async function clearMilestone(m) {
+    if (!detail) return;
+    setBusy(true);
+    try {
+      await api(`/api/permits/${detail.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ milestones: [{ key: m.key, clear: true }] }),
+      });
+      setMessage(`Cleared milestone ${m.key} (audited)`);
+      await openDetail(detail.id);
     } catch (e) {
       setMessage(String(e.message || e));
     } finally {
@@ -289,14 +560,31 @@ export default function App() {
   async function saveDetail() {
     setBusy(true);
     try {
+      // Official status fields are read-only — omit them
+      const {
+        official_status: _os,
+        source_native_status: _sns,
+        ...rest
+      } = detail;
       await api(`/api/permits/${detail.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(detail),
+        body: JSON.stringify({
+          primary_official_id: rest.primary_official_id,
+          jurisdiction_code: rest.jurisdiction_code,
+          internal_status: rest.internal_status,
+          owner: rest.owner,
+          next_action: rest.next_action,
+          next_action_due: rest.next_action_due,
+          source_url: rest.source_url,
+          permit_kind: rest.permit_kind,
+        }),
       });
       setMessage('Saved.');
       await refreshLists();
       await openDetail(detail.id);
+    } catch (e) {
+      setMessage(String(e.message || e));
     } finally {
       setBusy(false);
     }
@@ -576,8 +864,11 @@ export default function App() {
                 </option>
               ))}
             </select>
-            <a className="btn" href="/api/export.xlsx">
+            <a className="btn" href="/api/export.xlsx" title="Confirmed contacts only; sandbox/rejected excluded">
               Structured export
+            </a>
+            <a className="btn" href="/api/export.xlsx?includeReviewed=1" title="Confirmed + reviewed candidates">
+              Export + reviewed
             </a>
             <button type="button" className="btn primary" disabled={busy} onClick={syncFairfaxShaped}>
               Run Fairfax checks
@@ -703,8 +994,6 @@ export default function App() {
                     {[
                       ['primary_official_id', 'Primary official ID'],
                       ['jurisdiction_code', 'Jurisdiction'],
-                      ['source_native_status', 'Source-native status'],
-                      ['official_status', 'Official status'],
                       ['internal_status', 'Internal status'],
                       ['owner', 'Assigned to'],
                       ['next_action', 'Next action'],
@@ -721,6 +1010,14 @@ export default function App() {
                         />
                       </div>
                     ))}
+                    <div className="field">
+                      <label>Official status (connector · read-only)</label>
+                      <input readOnly value={detail.official_status ?? ''} />
+                    </div>
+                    <div className="field">
+                      <label>Source-native status (connector · read-only)</label>
+                      <input readOnly value={detail.source_native_status ?? ''} />
+                    </div>
                     <div className="field full">
                       <label>Notes (from workbook col S — preserved)</label>
                       <textarea rows={3} readOnly value={detail.notes_raw || ''} />
@@ -790,14 +1087,37 @@ export default function App() {
                   ) : null}
                   <h3>Property identity</h3>
                   <p className="muted">
-                    Address/parcel required before Find contacts. Lot ranges need explicit evidence —
-                    no one owner for a whole range without review.
+                    Select/confirm the exact address or jurisdiction-qualified parcel before Find
+                    contacts. State is never defaulted. Lot ranges need explicit evidence.
                   </p>
+                  {selectedProperty() ? (
+                    <div className="attention-item">
+                      <strong>Will search</strong>
+                      <div className="mono">
+                        {selectedProperty().site_address || '(no street)'}
+                        {selectedProperty().parcel_apn
+                          ? ` · APN ${selectedProperty().parcel_apn}`
+                          : ''}
+                      </div>
+                      <div className="muted">
+                        {[selectedProperty().city, selectedProperty().state, selectedProperty().zip]
+                          .filter(Boolean)
+                          .join(', ') || 'city/state/ZIP incomplete'}
+                        {selectedProperty().parcel_jurisdiction
+                          ? ` · jurisdiction ${selectedProperty().parcel_jurisdiction}`
+                          : ''}
+                        {' · '}
+                        link: {selectedProperty().link_state}
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="muted">No property selected — choose a linked candidate or enter one.</p>
+                  )}
                   <div className="fields">
                     {[
                       ['site_address', 'Site address'],
                       ['city', 'City'],
-                      ['state', 'State'],
+                      ['state', 'State (required — no default)'],
                       ['zip', 'ZIP'],
                       ['parcel_apn', 'Parcel / APN'],
                       ['parcel_jurisdiction', 'Parcel jurisdiction'],
@@ -814,7 +1134,7 @@ export default function App() {
                   </div>
                   <div className="toolbar">
                     <button type="button" className="btn" disabled={busy} onClick={() => saveProperty()}>
-                      Save property
+                      Save property{propertyForm.id ? ` #${propertyForm.id}` : ''}
                     </button>
                     <button
                       type="button"
@@ -824,29 +1144,112 @@ export default function App() {
                     >
                       Confirm property for lot
                     </button>
+                    <button type="button" className="btn" disabled={busy} onClick={offerOfficialAddress}>
+                      Offer official site address
+                    </button>
                   </div>
                   <ul className="history">
                     {properties.map((p) => (
                       <li key={p.link_id || p.id}>
-                        <strong>{p.site_address}</strong> · {p.city}, {p.state} {p.zip}
-                        <div className="muted">
-                          {p.link_state} · {p.match_state} · {p.source}
-                          {p.parcel_apn ? ` · APN ${p.parcel_apn}` : ''}
-                        </div>
+                        <label style={{ display: 'flex', gap: '0.5rem', alignItems: 'flex-start' }}>
+                          <input
+                            type="radio"
+                            name="selectedProperty"
+                            checked={selectedPropertyId === p.id}
+                            onChange={() => applyPropertyToForm(p)}
+                          />
+                          <span>
+                            <strong>{p.site_address || p.parcel_apn || '—'}</strong> · {p.city}, {p.state}{' '}
+                            {p.zip}
+                            <div className="muted">
+                              #{p.id} · {p.link_state} · {p.match_state} · {p.source}
+                              {p.parcel_apn ? ` · APN ${p.parcel_apn}` : ''}
+                            </div>
+                          </span>
+                        </label>
+                        {p.link_state !== 'confirmed' ? (
+                          <button
+                            type="button"
+                            className="btn"
+                            disabled={busy}
+                            onClick={() => confirmSelectedProperty(p)}
+                          >
+                            Confirm this property
+                          </button>
+                        ) : null}
                       </li>
                     ))}
                   </ul>
 
                   <h3>Contacts</h3>
                   <p className="muted">
-                    Roles are separate (owner ≠ applicant). Provider return ≠ confirmed contact.
-                    {tracerfy
-                      ? ` Tracerfy mode: ${tracerfy.mode}${tracerfy.productionEnabled ? '' : ' (production disabled)'}.`
-                      : ''}
+                    Roles are separate (owner ≠ applicant ≠ contractor). Provider return ≠ confirmed.
+                    {tracerfy ? ` Mode: ${tracerfy.mode}.` : ''}
                   </p>
+                  <div className="toolbar">
+                    {['local_fixture', 'hosted_sandbox', 'production'].map((m) => (
+                      <button
+                        key={m}
+                        type="button"
+                        className={`btn ${tracerfy?.mode === m || tracerfy?.requestedMode === m ? 'primary' : ''}`}
+                        disabled={busy || (m === 'production' && !tracerfy?.productionGatesOk)}
+                        onClick={() => setProviderMode(m)}
+                      >
+                        {m}
+                      </button>
+                    ))}
+                  </div>
                   <div className="toolbar">
                     <button type="button" className="btn primary" disabled={busy} onClick={findContacts}>
                       Find contacts
+                    </button>
+                  </div>
+                  <h4>Add manual contact</h4>
+                  <div className="fields">
+                    <div className="field">
+                      <label htmlFor="mc_role">Role</label>
+                      <select
+                        id="mc_role"
+                        value={manualContact.role}
+                        onChange={(e) => setManualContact({ ...manualContact, role: e.target.value })}
+                      >
+                        {[
+                          'property_owner',
+                          'owner_company',
+                          'applicant',
+                          'contractor',
+                          'developer',
+                          'architect_engineer',
+                          'agency_contact',
+                          'internal_assignee',
+                          'unknown_party',
+                        ].map((r) => (
+                          <option key={r} value={r}>
+                            {r}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    {[
+                      ['full_name', 'Full name'],
+                      ['company', 'Company'],
+                      ['phone', 'Phone'],
+                      ['email', 'Email'],
+                      ['mailing_address', 'Mailing address'],
+                    ].map(([key, label]) => (
+                      <div className="field" key={key}>
+                        <label htmlFor={`mc_${key}`}>{label}</label>
+                        <input
+                          id={`mc_${key}`}
+                          value={manualContact[key]}
+                          onChange={(e) => setManualContact({ ...manualContact, [key]: e.target.value })}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                  <div className="toolbar">
+                    <button type="button" className="btn" disabled={busy} onClick={saveManualContact}>
+                      Save manual contact
                     </button>
                   </div>
                   <ul className="history">
@@ -857,8 +1260,14 @@ export default function App() {
                           {c.phone || '—'} · {c.email || '—'}
                         </div>
                         <div className="muted">
-                          {c.provider || 'manual'} · {c.provider_source} · retrieved {c.retrieved_at || '—'}
-                          {c.record_origin === 'sandbox_demo' ? ' · SANDBOX DEMO' : ''}
+                          {c.provider || 'manual'} · {c.provider_source} · {c.validation_state} · retrieved{' '}
+                          {c.retrieved_at || '—'}
+                          {c.record_origin === 'sandbox_demo' || c.record_origin === 'local_fixture'
+                            ? ` · ${c.record_origin.toUpperCase()}`
+                            : ''}
+                          {c.restriction_flags_json && c.restriction_flags_json !== '[]'
+                            ? ` · flags ${c.restriction_flags_json}`
+                            : ''}
                         </div>
                         <div className="toolbar">
                           <button type="button" className="btn" onClick={() => setContactStatus(c.id, 'confirmed')}>
@@ -873,7 +1282,7 @@ export default function App() {
                   </ul>
                   {contactJobs.length ? (
                     <ul className="history">
-                      {contactJobs.slice(0, 3).map((j) => (
+                      {contactJobs.slice(0, 5).map((j) => (
                         <li key={j.id}>
                           Job {j.id}: {j.status} · {j.mode} · est {j.estimated_credits} / actual{' '}
                           {j.actual_credits}
@@ -882,6 +1291,32 @@ export default function App() {
                       ))}
                     </ul>
                   ) : null}
+
+                  <h3>Milestone waiver</h3>
+                  <p className="muted">Record-level n/a waiver with reason; revoke anytime. Not a global completion.</p>
+                  <div className="toolbar">
+                    <select
+                      value={waiverForm.milestone_key}
+                      onChange={(e) => setWaiverForm({ ...waiverForm, milestone_key: e.target.value })}
+                    >
+                      <option value="">Milestone…</option>
+                      {milestones
+                        .filter((m) => !m.key.startsWith('official_'))
+                        .map((m) => (
+                          <option key={m.key} value={m.key}>
+                            {m.label}
+                          </option>
+                        ))}
+                    </select>
+                    <input
+                      placeholder="Reason required"
+                      value={waiverForm.reason}
+                      onChange={(e) => setWaiverForm({ ...waiverForm, reason: e.target.value })}
+                    />
+                    <button type="button" className="btn" disabled={busy} onClick={submitWaiver}>
+                      Waive
+                    </button>
+                  </div>
 
                   <h3>Official IDs extracted</h3>
                   <ul className="history">
@@ -912,7 +1347,18 @@ export default function App() {
                                 }
                               }}
                             />
-                            <span className="muted">[{m.value_kind}] editable · history via Save path</span>
+                            <span className="muted">[{m.value_kind}] editable · manual assertion</span>
+                            <button type="button" className="btn" onClick={() => clearMilestone(m)}>
+                              Clear (audit)
+                            </button>
+                            <button
+                              type="button"
+                              className="btn"
+                              onClick={() => revokeWaiver(m.key)}
+                              title="Revoke any active waiver for this milestone"
+                            >
+                              Revoke waiver
+                            </button>
                           </div>
                         )}
                       </li>
@@ -1089,6 +1535,109 @@ export default function App() {
               Upload a workbook to preview sections, or import the store source workbook.
             </p>
           )}
+
+          <h2>Property crosswalk</h2>
+          <p className="muted">
+            CSV/XLSX address/parcel mapping by community/project + lot. Preview matches, ambiguities,
+            missing input, and ranges. Confirm selected rows before commit — server revalidates.
+          </p>
+          <div className="toolbar">
+            <a className="btn" href="/api/property-crosswalk/template.csv">
+              Download template
+            </a>
+            <label className="btn">
+              Preview crosswalk file
+              <input
+                type="file"
+                accept=".csv,.xlsx,.xls"
+                hidden
+                onChange={(e) => e.target.files?.[0] && previewCrosswalkFile(e.target.files[0])}
+              />
+            </label>
+            <button
+              type="button"
+              className="btn primary"
+              disabled={busy || !crosswalkPreview?.length}
+              onClick={commitCrosswalkSelected}
+            >
+              Commit selected
+            </button>
+            <button
+              type="button"
+              className="btn"
+              disabled={busy}
+              onClick={async () => {
+                setCrosswalkMissing((await api('/api/property-crosswalk/missing')).rows || []);
+              }}
+            >
+              Missing-input queue
+            </button>
+          </div>
+          {crosswalkPreview?.length ? (
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Select</th>
+                    <th>Row</th>
+                    <th>Project / Lot</th>
+                    <th>Address</th>
+                    <th>Match</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {crosswalkPreview.map((r, idx) => (
+                    <tr key={`${r.source_row}-${idx}`}>
+                      <td>
+                        <input
+                          type="checkbox"
+                          checked={Boolean(r.selected)}
+                          onChange={(e) => {
+                            const next = [...crosswalkPreview];
+                            next[idx] = { ...r, selected: e.target.checked };
+                            setCrosswalkPreview(next);
+                          }}
+                        />
+                      </td>
+                      <td>{r.source_row}</td>
+                      <td className="mono">
+                        {r.project_code} / {r.lot_label}
+                      </td>
+                      <td>
+                        {r.site_address} {r.city} {r.state} {r.zip}
+                      </td>
+                      <td>
+                        <span
+                          className={`pill ${
+                            String(r.match_status).startsWith('matched')
+                              ? 'live'
+                              : r.match_status === 'unmatched' || r.match_status === 'missing_input'
+                                ? 'danger'
+                                : 'warn'
+                          }`}
+                        >
+                          {r.match_status}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : null}
+          {crosswalkMissing?.length ? (
+            <>
+              <h3>Lots missing property identity</h3>
+              <ul className="history">
+                {crosswalkMissing.slice(0, 20).map((r) => (
+                  <li key={r.lot_group_id}>
+                    {r.community_name} / {r.lot_label} · {r.project_code}
+                    <span className="muted"> · use template — do not fabricate addresses</span>
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : null}
         </div>
       )}
 

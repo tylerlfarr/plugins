@@ -47,6 +47,10 @@ import {
   confirmationHistory,
   getProperty,
   missingPropertyLotCount,
+  missingPropertyQueue,
+  offerOfficialSiteAddressCandidate,
+  crosswalkTemplateCsv,
+  propertyBelongsToPermit,
 } from './property.js';
 import {
   listContacts,
@@ -59,6 +63,8 @@ import {
   tracerfyConfig,
   reconcileTimedOutJob,
 } from './contacts.js';
+import { setProviderMode, PROVIDER_MODES } from './providers/tracerfy.js';
+import XLSX from 'xlsx';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, '..');
@@ -329,11 +335,10 @@ app.get('/api/permits/:id', (req, res) => {
 app.patch('/api/permits/:id', (req, res) => {
   const permit = db.prepare('SELECT * FROM permit_records WHERE id = ?').get(Number(req.params.id));
   if (!permit) return res.status(404).json({ error: 'Not found' });
+  // official_status + source_native_status are connector-owned (read-only via API)
   const editable = [
     'primary_official_id',
     'jurisdiction_code',
-    'source_native_status',
-    'official_status',
     'internal_status',
     'owner',
     'next_action',
@@ -341,6 +346,11 @@ app.patch('/api/permits/:id', (req, res) => {
     'source_url',
     'permit_kind',
   ];
+  if ('official_status' in (req.body || {}) || 'source_native_status' in (req.body || {})) {
+    return res.status(400).json({
+      error: 'official_status and source_native_status are read-only (official connector fields)',
+    });
+  }
   const user = currentUser();
   for (const key of editable) {
     if (!(key in (req.body || {}))) continue;
@@ -355,10 +365,24 @@ app.patch('/api/permits/:id', (req, res) => {
   }
   if (Array.isArray(req.body?.milestones)) {
     for (const m of req.body.milestones) {
-      if (!m?.key || m.value == null || m.value === '') continue;
+      if (!m?.key) continue;
+      if (String(m.key).startsWith('official_')) {
+        return res.status(400).json({ error: `Milestone ${m.key} is official/read-only` });
+      }
       const existing = db
         .prepare(`SELECT value FROM internal_milestones WHERE permit_record_id = ? AND key = ?`)
         .get(permit.id, m.key);
+      // Deliberate clear (distinct from blank import cells which preserve prior values)
+      if (m.clear === true || m.value === '') {
+        if (!existing) continue;
+        if (!m.clear && m.value === '') continue; // ignore accidental empty without clear flag
+        recordChange(permit.id, `milestone:${m.key}`, existing.value, '', user, 'ui_clear');
+        db.prepare(
+          `UPDATE internal_milestones SET value = '', edited_in_app = 1 WHERE permit_record_id = ? AND key = ?`
+        ).run(permit.id, m.key);
+        continue;
+      }
+      if (m.value == null) continue;
       if (existing) {
         if (String(existing.value) === String(m.value)) continue;
         recordChange(permit.id, `milestone:${m.key}`, existing.value, m.value, user, 'ui');
@@ -731,8 +755,12 @@ app.post('/api/import/gospel/store', (_req, res) => {
   res.json({ summary, path: SOURCE_WORKBOOK });
 });
 
-app.get('/api/export.xlsx', (_req, res) => {
-  const buf = exportCoexistenceXlsx();
+app.get('/api/export.xlsx', (req, res) => {
+  const includeReviewed = req.query.includeReviewed === '1' || req.query.includeReviewed === 'true';
+  const buf = exportCoexistenceXlsx({
+    contactStatuses: ['confirmed'],
+    includeReviewedCandidates: includeReviewed,
+  });
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', 'attachment; filename="permit-ledger-structured-export.xlsx"');
   res.send(Buffer.from(buf));
@@ -814,9 +842,19 @@ app.get('/api/properties/:id', (req, res) => {
 });
 
 app.post('/api/properties', (req, res) => {
-  const property = upsertProperty(req.body || {}, { actor: currentUser() });
-  const { lot_group_id, permit_record_id, link_state } = req.body || {};
-  if (lot_group_id) {
+  try {
+    const body = req.body || {};
+    const { lot_group_id, permit_record_id, link_state } = body;
+    if (!lot_group_id) {
+      return res.status(400).json({ error: 'lot_group_id required — never implicit attach' });
+    }
+    if (permit_record_id) {
+      const permit = db.prepare('SELECT * FROM permit_records WHERE id = ?').get(Number(permit_record_id));
+      if (!permit || Number(permit.lot_group_id) !== Number(lot_group_id)) {
+        return res.status(400).json({ error: 'lot_group_id does not match selected permit' });
+      }
+    }
+    const property = upsertProperty(body, { actor: currentUser() });
     linkPropertyToLot({
       propertyId: property.id,
       lotGroupId: Number(lot_group_id),
@@ -825,15 +863,37 @@ app.post('/api/properties', (req, res) => {
       evidence: { source: 'manual_ui' },
       confirmedBy: link_state === 'confirmed' ? currentUser() : null,
     });
+    res.json({
+      property,
+      properties: permit_record_id ? listPropertiesForPermit(permit_record_id) : listPropertiesForLotSafe(lot_group_id),
+    });
+  } catch (e) {
+    res.status(400).json({ error: String(e.message || e) });
   }
-  res.json({ property, properties: permit_record_id ? listPropertiesForPermit(permit_record_id) : [] });
 });
+
+function listPropertiesForLotSafe(lotGroupId) {
+  return listPropertiesForPermit(
+    db.prepare(`SELECT id FROM permit_records WHERE lot_group_id = ? LIMIT 1`).get(Number(lotGroupId))?.id || 0
+  );
+}
 
 app.post('/api/properties/:id/confirm-link', (req, res) => {
   const property = getProperty(Number(req.params.id));
   if (!property) return res.status(404).json({ error: 'Not found' });
   const { lot_group_id, permit_record_id } = req.body || {};
   if (!lot_group_id) return res.status(400).json({ error: 'lot_group_id required' });
+  if (permit_record_id) {
+    const belonging = propertyBelongsToPermit(property.id, permit_record_id);
+    // Allow confirm when already linked OR when linking freshly with matching lot
+    const permit = db.prepare('SELECT * FROM permit_records WHERE id = ?').get(Number(permit_record_id));
+    if (!permit || Number(permit.lot_group_id) !== Number(lot_group_id)) {
+      return res.status(400).json({ error: 'Property/permit/lot mismatch' });
+    }
+    if (belonging.ok === false) {
+      // Fresh confirm path OK if lot matches
+    }
+  }
   linkPropertyToLot({
     propertyId: property.id,
     lotGroupId: Number(lot_group_id),
@@ -844,48 +904,140 @@ app.post('/api/properties/:id/confirm-link', (req, res) => {
   });
   res.json({
     property: getProperty(property.id),
-    properties: permit_record_id ? listPropertiesForPermit(permit_record_id) : listPropertiesForPermit(0),
+    properties: permit_record_id ? listPropertiesForPermit(permit_record_id) : [],
   });
 });
 
-app.post('/api/property-crosswalk/preview', (req, res) => {
-  const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
-  res.json({ preview: previewCrosswalk(rows) });
+app.post('/api/properties/offer-official-address', (req, res) => {
+  try {
+    const permitId = Number(req.body?.permit_record_id);
+    if (!permitId) return res.status(400).json({ error: 'permit_record_id required' });
+    res.json(offerOfficialSiteAddressCandidate(permitId, { actor: currentUser() }));
+  } catch (e) {
+    res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
+app.get('/api/property-crosswalk/template.csv', (_req, res) => {
+  res.setHeader('Content-Type', 'text/csv');
+  res.setHeader('Content-Disposition', 'attachment; filename="property-crosswalk-template.csv"');
+  res.send(crosswalkTemplateCsv());
+});
+
+app.get('/api/property-crosswalk/missing', (_req, res) => {
+  res.json({ rows: missingPropertyQueue(100) });
+});
+
+app.post('/api/property-crosswalk/preview', upload.single('file'), (req, res) => {
+  try {
+    let rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+    if (req.file) {
+      rows = parseCrosswalkUpload(req.file.buffer, req.file.originalname);
+    } else if (typeof req.body?.csv === 'string') {
+      rows = parseCrosswalkCsvText(req.body.csv);
+    }
+    res.json({ preview: previewCrosswalk(rows), rowCount: rows.length });
+  } catch (e) {
+    res.status(400).json({ error: String(e.message || e) });
+  }
 });
 
 app.post('/api/property-crosswalk/commit', (req, res) => {
-  const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
-  const preview = rows[0]?.match_status ? rows : previewCrosswalk(rows);
-  const summary = commitCrosswalk(preview, { actor: currentUser() });
-  res.json({ summary, preview });
+  try {
+    const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+    // Always server-revalidates; ignores client match_status / lot IDs as proof
+    const summary = commitCrosswalk(rows, {
+      actor: currentUser(),
+      confirmSelectedOnly: req.body?.confirmSelectedOnly !== false,
+    });
+    res.json({ summary });
+  } catch (e) {
+    res.status(400).json({ error: String(e.message || e) });
+  }
 });
+
+function parseCrosswalkCsvText(text) {
+  const lines = String(text || '')
+    .split(/\r?\n/)
+    .map((l) => l.trim())
+    .filter(Boolean);
+  if (!lines.length) return [];
+  const headers = lines[0].split(',').map((h) => h.trim());
+  return lines.slice(1).map((line, i) => {
+    const cols = line.split(',').map((c) => c.trim());
+    const row = { source_row: i + 2 };
+    headers.forEach((h, idx) => {
+      row[h] = cols[idx] || '';
+    });
+    return row;
+  });
+}
+
+function parseCrosswalkUpload(buffer, filename = '') {
+  const lower = String(filename).toLowerCase();
+  if (lower.endsWith('.csv') || lower.endsWith('.txt')) {
+    return parseCrosswalkCsvText(buffer.toString('utf8'));
+  }
+  const wb = XLSX.read(buffer, { type: 'buffer' });
+  const sheet = wb.Sheets[wb.SheetNames[0]];
+  return XLSX.utils.sheet_to_json(sheet, { defval: '' }).map((r, i) => ({ ...r, source_row: i + 2 }));
+}
 
 // —— Contacts / Tracerfy ——
 app.get('/api/contacts/meta', (_req, res) => {
-  res.json({ roles: CONTACT_ROLES, tracerfy: tracerfyConfig() });
+  const cfg = tracerfyConfig();
+  // Never expose tokens
+  res.json({
+    roles: CONTACT_ROLES,
+    tracerfy: cfg,
+    modes: PROVIDER_MODES,
+  });
+});
+
+app.post('/api/contacts/provider-mode', (req, res) => {
+  try {
+    const mode = req.body?.mode;
+    res.json({ tracerfy: setProviderMode(mode) });
+  } catch (e) {
+    res.status(400).json({ error: String(e.message || e) });
+  }
 });
 
 app.post('/api/contacts', (req, res) => {
-  const contact = addManualContact(req.body || {}, { actor: currentUser() });
-  res.json({ contact });
+  try {
+    const body = req.body || {};
+    if (body.permit_record_id && body.property_id) {
+      const belonging = propertyBelongsToPermit(body.property_id, body.permit_record_id);
+      if (!belonging.ok) return res.status(400).json({ error: belonging.error });
+    }
+    const contact = addManualContact(body, { actor: currentUser() });
+    res.json({ contact });
+  } catch (e) {
+    res.status(400).json({ error: String(e.message || e) });
+  }
 });
 
 app.post('/api/contacts/:id/status', (req, res) => {
-  const contact = setContactStatus(Number(req.params.id), req.body?.status, {
-    reason: req.body?.reason || '',
-    actor: currentUser(),
-  });
-  res.json({ contact });
+  try {
+    const contact = setContactStatus(Number(req.params.id), req.body?.status, {
+      reason: req.body?.reason || '',
+      actor: currentUser(),
+    });
+    res.json({ contact });
+  } catch (e) {
+    res.status(400).json({ error: String(e.message || e) });
+  }
 });
 
 app.post('/api/contacts/find', async (req, res) => {
   try {
+    // allowSandboxAttach removed — server controls provenance
     const result = await findContactsForProperty({
       propertyId: Number(req.body?.property_id),
       permitRecordId: req.body?.permit_record_id ? Number(req.body.permit_record_id) : null,
       endpointKey: req.body?.endpoint || 'instant_trace',
       forceFail: req.body?.forceFail || null,
-      allowSandboxAttach: Boolean(req.body?.allowSandboxAttach),
+      requireConfirmedLink: req.body?.requireConfirmedLink !== false,
     });
     res.json(result);
   } catch (e) {
@@ -894,18 +1046,50 @@ app.post('/api/contacts/find', async (req, res) => {
 });
 
 app.post('/api/contacts/jobs/:id/reconcile', (req, res) => {
-  res.json(reconcileTimedOutJob(Number(req.params.id)));
+  try {
+    res.json(
+      reconcileTimedOutJob(Number(req.params.id), {
+        resolution: req.body?.resolution || 'manual_abandon',
+        note: req.body?.note || '',
+      })
+    );
+  } catch (e) {
+    res.status(400).json({ error: String(e.message || e) });
+  }
 });
 
 app.post('/api/milestones/:permitId/waiver', (req, res) => {
   const permitId = Number(req.params.permitId);
   const { milestone_key, reason } = req.body || {};
   if (!milestone_key) return res.status(400).json({ error: 'milestone_key required' });
+  if (!reason || !String(reason).trim()) {
+    return res.status(400).json({ error: 'waiver reason required' });
+  }
   db.prepare(
-    `INSERT INTO milestone_waivers(permit_record_id, milestone_key, reason, waived_by)
-     VALUES (?, ?, ?, ?)
-     ON CONFLICT(permit_record_id, milestone_key) DO UPDATE SET reason = excluded.reason, waived_by = excluded.waived_by`
-  ).run(permitId, milestone_key, reason || '', currentUser());
+    `INSERT INTO milestone_waivers(permit_record_id, milestone_key, reason, waived_by, revoked_at, revoked_by)
+     VALUES (?, ?, ?, ?, NULL, NULL)
+     ON CONFLICT(permit_record_id, milestone_key) DO UPDATE SET
+       reason = excluded.reason,
+       waived_by = excluded.waived_by,
+       revoked_at = NULL,
+       revoked_by = NULL,
+       created_at = datetime('now')`
+  ).run(permitId, milestone_key, reason, currentUser());
+  recordChange(permitId, `waiver:${milestone_key}`, '', reason, currentUser(), 'waiver');
+  updateLotReadiness(permitId);
+  rebuildAttention();
+  res.json({ ok: true, readiness: getStoredAssessment(permitId) });
+});
+
+app.post('/api/milestones/:permitId/waiver/revoke', (req, res) => {
+  const permitId = Number(req.params.permitId);
+  const { milestone_key } = req.body || {};
+  if (!milestone_key) return res.status(400).json({ error: 'milestone_key required' });
+  db.prepare(
+    `UPDATE milestone_waivers SET revoked_at = datetime('now'), revoked_by = ?
+     WHERE permit_record_id = ? AND milestone_key = ? AND revoked_at IS NULL`
+  ).run(currentUser(), permitId, milestone_key);
+  recordChange(permitId, `waiver_revoke:${milestone_key}`, 'active', 'revoked', currentUser(), 'waiver');
   updateLotReadiness(permitId);
   rebuildAttention();
   res.json({ ok: true, readiness: getStoredAssessment(permitId) });

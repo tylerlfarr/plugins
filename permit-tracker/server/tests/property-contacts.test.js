@@ -7,6 +7,7 @@ import path from 'node:path';
 const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'permit-pc-'));
 process.env.PERMIT_DB_PATH = path.join(tmpDir, 'pc.sqlite');
 process.env.PERMIT_DEMO = '0';
+delete process.env.TRACERFY_LIVE_SANDBOX;
 
 const { buildSanitizedWorkbookBuffer } = await import('../fixtures/buildSanitizedWorkbook.js');
 const { parseWorkbookBuffer, commitWorkbookParse } = await import('../workbookImport.js');
@@ -27,10 +28,13 @@ const { exportCoexistenceXlsx } = await import('../excelExport.js');
 const { assessPermitReadiness, classifyMilestoneValue, READINESS_STATES } = await import(
   '../readiness.js'
 );
-const { reconcileTimedOutJob } = await import('../providers/tracerfy.js');
+const { reconcileTimedOutJob, setProviderMode, PROVIDER_MODES } = await import(
+  '../providers/tracerfy.js'
+);
 const { activateSource, ensureSourceRegistrySeeded } = await import('../sources/registry.js');
 
 commitWorkbookParse(parseWorkbookBuffer(buildSanitizedWorkbookBuffer()));
+setProviderMode(PROVIDER_MODES.LOCAL_FIXTURE);
 
 test('multi-field water ≠ sewer; future date ≠ completion; ambiguous na', () => {
   const today = new Date('2026-10-04T12:00:00Z');
@@ -47,7 +51,6 @@ test('multi-field water ≠ sewer; future date ≠ completion; ambiguous na', ()
     )
     .get();
   const a = assessPermitReadiness(permit.id, { today });
-  // Distinct blanks for LoCo Water Ordered + Received
   const missing = a.outstanding.filter((o) => o.status === 'missing').map((o) => o.id);
   assert.ok(missing.includes('water_requested') || missing.includes('water_received'));
 });
@@ -83,7 +86,12 @@ test('property crosswalk matches stable identity; range needs review', () => {
   ]);
   assert.equal(preview[0].match_status, 'matched_stable_key');
   assert.equal(preview[1].match_status, 'needs_review_range');
-  const summary = commitCrosswalk(preview);
+  const summary = commitCrosswalk(
+    preview.map((r) => ({
+      selected: r.match_status === 'matched_stable_key',
+      payload: r.payload || r,
+    }))
+  );
   assert.ok(summary.linked >= 1);
 });
 
@@ -96,7 +104,7 @@ test('sandbox find contacts isolated from operational import records', async () 
     .get();
   const property = upsertProperty(
     {
-      site_address: '10 Builder Test Rd',
+      site_address: '10 Builder Isolation Rd',
       city: 'Demo City',
       state: 'VA',
       zip: '20100',
@@ -120,10 +128,9 @@ test('sandbox find contacts isolated from operational import records', async () 
     endpointKey: 'instant_trace',
   });
   assert.equal(isolated.attached, false);
-  assert.match(isolated.isolation || '', /sandbox_results_not_attached/);
+  assert.match(isolated.isolation || '', /not_attached/);
   assert.equal(assessPermitReadiness(permit.id).state, beforeReady);
 
-  // Dedicated sandbox property may attach fabricated contacts
   const sandboxProp = upsertProperty(
     {
       site_address: '1 Sandbox Lane',
@@ -137,10 +144,10 @@ test('sandbox find contacts isolated from operational import records', async () 
   );
   const sand = await findContactsForProperty({
     propertyId: sandboxProp.id,
-    allowSandboxAttach: true,
+    requireConfirmedLink: false,
   });
   assert.ok(sand.saved.length >= 1);
-  assert.equal(sand.saved[0].record_origin, 'sandbox_demo');
+  assert.equal(sand.saved[0].record_origin, 'local_fixture');
   assert.ok(!sand.saved[0].full_name.toLowerCase().includes('should_not'));
   assert.equal(setContactStatus(sand.saved[0].id, 'confirmed').status, 'confirmed');
 });
@@ -161,40 +168,42 @@ test('provider failure modes: no match, credits, rate limit, timeout reconcile, 
   const miss = await findContactsForProperty({
     propertyId: sandAddr(2).id,
     forceFail: 'no_match',
-    allowSandboxAttach: true,
+    requireConfirmedLink: false,
   });
   assert.equal(miss.noMatch, true);
 
   const credits = await findContactsForProperty({
     propertyId: sandAddr(3).id,
     forceFail: 'insufficient_credits',
-    allowSandboxAttach: true,
+    requireConfirmedLink: false,
   });
   assert.equal(credits.job.status, 'failed');
 
   const rate = await findContactsForProperty({
     propertyId: sandAddr(4).id,
     forceFail: 'rate_limit',
-    allowSandboxAttach: true,
+    requireConfirmedLink: false,
   });
   assert.equal(rate.job.status, 'failed');
 
   const timed = await findContactsForProperty({
     propertyId: sandAddr(5).id,
     forceFail: 'timeout',
-    allowSandboxAttach: true,
+    requireConfirmedLink: false,
   });
   assert.equal(timed.job.status, 'timed_out');
-  assert.equal(reconcileTimedOutJob(timed.job.id).action, 'reconciled');
+  const rec = reconcileTimedOutJob(timed.job.id, { resolution: 'manual_abandon' });
+  assert.equal(rec.action, 'manually_resolved_abandoned');
+  assert.equal(rec.safeToResubmit, false);
 
   const dedupeProp = sandAddr(6);
   const first = await findContactsForProperty({
     propertyId: dedupeProp.id,
-    allowSandboxAttach: true,
+    requireConfirmedLink: false,
   });
   const second = await findContactsForProperty({
     propertyId: dedupeProp.id,
-    allowSandboxAttach: true,
+    requireConfirmedLink: false,
   });
   assert.equal(second.deduped, true);
   assert.equal(first.job.id, second.job.id);
@@ -223,6 +232,16 @@ test('wrong-role contact stays labeled; export excludes sandbox contacts', () =>
   });
   assert.equal(wrong.role, 'property_owner');
   setContactStatus(wrong.id, 'rejected', { reason: 'wrong_role', actor: 'test' });
+
+  // Confirm one for export default
+  addManualContact({
+    permit_record_id: permit.id,
+    lot_group_id: permit.lot_group_id,
+    role: 'property_owner',
+    full_name: 'Confirmed Export Owner',
+    status: 'confirmed',
+    record_origin: 'manual',
+  });
 
   const buf = exportCoexistenceXlsx();
   assert.ok(Buffer.isBuffer(buf) && buf.length > 500);
