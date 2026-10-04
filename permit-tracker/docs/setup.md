@@ -50,7 +50,11 @@ Lot readiness: Ready / Blocked / Needs verification under configurable workbook 
 | `PERMIT_DB_PATH` | SQLite file path |
 | `PORT` | API port (default 4173) |
 | `PERMIT_DEMO=1` | Allow demo probe + synthetic for demo/fixture origins only |
-| `SOURCE_WORKBOOK_XLSX` | Override workbook path |
+| `SOURCE_WORKBOOK_XLSX` | Override workbook path (optional; clean deploy uses `AUTO_SEED=0`) |
+| `AUTO_SEED=0` | Skip empty-DB auto-import (required for reproducible deploy) |
+| `PILOT_AUTH=1` | Invite-only auth (see [deploy.md](./deploy.md)) |
+
+Protected pilot deploy notes: [deploy.md](./deploy.md).
 
 ## Integrity notes
 

@@ -3,8 +3,9 @@ import cors from 'cors';
 import multer from 'multer';
 import path from 'node:path';
 import fs from 'node:fs';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { fileURLToPath } from 'node:url';
-import { db, getSetting, setSetting, recordChange, migrate } from './db.js';
+import { db, getSetting, setSetting, recordChange, migrate, getDbPath } from './db.js';
 import { listConnectors, FAIRFAX_FIELD_AVAILABILITY } from './connectors/index.js';
 import {
   syncPermitById,
@@ -70,29 +71,68 @@ import {
   USE_SOURCES,
   setManualUseOverride,
 } from './useClassification.js';
+import {
+  attachAuth,
+  requireAuth,
+  requireOwner,
+  protectStateChange,
+  authEnabled,
+  authStatus,
+  bootstrapOwnerFromEnv,
+  login,
+  logout,
+  acceptInvite,
+  createInvite,
+  publicUser,
+  serializeCookie,
+  clearCookie,
+  COOKIE_NAME,
+} from './auth.js';
 import XLSX from 'xlsx';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, '..');
 const clientDist = path.join(root, 'client', 'dist');
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+const requestActor = new AsyncLocalStorage();
 
 const SOURCE_WORKBOOK =
   process.env.SOURCE_WORKBOOK_XLSX ||
-  '/cursor/stores/self/internal/Permit_Tracker_9.1.2026.xlsx';
+  process.env.GOSPEL_XLSX ||
+  '';
 
 migrate();
+bootstrapOwnerFromEnv();
 ensureSourceRegistrySeeded();
-if (db.prepare('SELECT COUNT(*) AS c FROM community_sections').get().c === 0) {
-  seed({ includeDemoProbe: process.env.PERMIT_DEMO === '1' });
+// Clean deploy: do NOT auto-seed from /cursor/stores. Only seed when a workbook path
+// is configured and present, or PERMIT_DEMO=1 requests the isolated probe.
+const autoSeed = process.env.AUTO_SEED !== '0';
+if (autoSeed && db.prepare('SELECT COUNT(*) AS c FROM community_sections').get().c === 0) {
+  const workbookReady = SOURCE_WORKBOOK && fs.existsSync(SOURCE_WORKBOOK);
+  if (workbookReady || process.env.PERMIT_DEMO === '1') {
+    seed({ includeDemoProbe: process.env.PERMIT_DEMO === '1' });
+  }
 }
 
 const app = express();
-app.use(cors());
+app.use(cors({ origin: true, credentials: true }));
 app.use(express.json({ limit: '4mb' }));
+app.use(attachAuth);
+app.use((req, res, next) => {
+  requestActor.run({ actor: req.actor }, next);
+});
+app.use(protectStateChange);
+// Invite-only when PILOT_AUTH=1 — health + auth endpoints stay public.
+app.use('/api', (req, res, next) => {
+  if (req.path === '/health' || req.path.startsWith('/auth')) return next();
+  return requireAuth(req, res, next);
+});
 
 function currentUser() {
-  return getSetting('current_user', 'demo.user');
+  const store = requestActor.getStore();
+  if (store?.actor) return store.actor;
+  if (authEnabled()) return 'anonymous';
+  return getSetting('current_user', 'local.dev');
 }
 
 const PERMIT_SQL = `SELECT p.*,
@@ -103,13 +143,81 @@ const PERMIT_SQL = `SELECT p.*,
   JOIN community_sections cs ON cs.id = lg.section_id`;
 
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, service: 'permit-tracker', mode: 'workbook-native-prototype' });
+  res.json({
+    ok: true,
+    service: 'permit-ledger',
+    mode: 'workbook-native-prototype',
+    auth: authEnabled(),
+    dbPathConfigured: Boolean(process.env.PERMIT_DB_PATH),
+  });
 });
 
-app.get('/api/meta', (_req, res) => {
+app.get('/api/auth/status', (req, res) => {
+  res.json({
+    ...authStatus(),
+    user: publicUser(req.user),
+  });
+});
+
+app.post('/api/auth/login', (req, res) => {
+  try {
+    const result = login(req.body?.email, req.body?.password);
+    const secure = process.env.COOKIE_SECURE === '1' || req.secure;
+    res.setHeader('Set-Cookie', serializeCookie(result.token, { secure }));
+    res.json({ user: result.user, expires_at: result.expires_at });
+  } catch (e) {
+    res.status(401).json({ error: String(e.message || e) });
+  }
+});
+
+app.post('/api/auth/logout', (req, res) => {
+  logout(req.authToken);
+  const secure = process.env.COOKIE_SECURE === '1' || req.secure;
+  res.setHeader('Set-Cookie', clearCookie({ secure }));
+  res.json({ ok: true });
+});
+
+app.post('/api/auth/accept-invite', (req, res) => {
+  try {
+    const user = acceptInvite({
+      token: req.body?.token,
+      password: req.body?.password,
+      displayName: req.body?.displayName || '',
+    });
+    const result = login(user.email, req.body?.password);
+    const secure = process.env.COOKIE_SECURE === '1' || req.secure;
+    res.setHeader('Set-Cookie', serializeCookie(result.token, { secure }));
+    res.json({ user: result.user });
+  } catch (e) {
+    res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
+app.post('/api/auth/invite', requireAuth, requireOwner, (req, res) => {
+  try {
+    const invite = createInvite({
+      email: req.body?.email,
+      role: req.body?.role || 'operator',
+      createdBy: req.user?.id,
+    });
+    res.json({
+      email: invite.email,
+      role: invite.role,
+      expires_at: invite.expires_at,
+      // Token returned once to owner for out-of-band delivery — not logged.
+      invite_token: invite.token,
+    });
+  } catch (e) {
+    res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
+app.get('/api/meta', requireAuth, (req, res) => {
   const rules = getReadinessRuleset();
   res.json({
     user: currentUser(),
+    authUser: publicUser(req.user),
+    authEnabled: authEnabled(),
     staleDays: Number(getSetting('stale_days', '14')),
     approachingStartDays: Number(rules.approachingStartDays || 21),
     demoMode: getSetting('demo_mode', '0') === '1',
@@ -124,6 +232,9 @@ app.get('/api/meta', (_req, res) => {
     productPromise:
       'Automatically run specific permit checks for communities/lots, preserve internal spreadsheet workflow, show what changed before morning meeting.',
     importProfile: 'source workbook (employer-specific mapping separate from reusable core)',
+    trialSequence:
+      'Import workbook → fill missing property info → confirm property → retrieve supported official info → optionally find contacts → review → export → inspect Attention',
+    businessName: getSetting('business_name', ''),
   });
 });
 
@@ -148,10 +259,11 @@ app.post('/api/permits/:id/use-classification', (req, res) => {
   }
 });
 
-app.post('/api/settings', (req, res) => {
+app.post('/api/settings', requireAuth, requireOwner, (req, res) => {
   const { staleDays, user, demoMode } = req.body || {};
   if (staleDays != null) setSetting('stale_days', Number(staleDays));
-  if (user) setSetting('current_user', String(user));
+  // When auth is on, identity comes from the session — do not allow global demo.user override.
+  if (user && !authEnabled()) setSetting('current_user', String(user));
   if (demoMode != null) setSetting('demo_mode', demoMode ? '1' : '0');
   rebuildAttention();
   res.json({
@@ -674,12 +786,12 @@ app.get('/api/idless-candidates', (_req, res) => {
   });
 });
 
-app.post('/api/sync/:id', async (req, res) => {
+app.post('/api/sync/:id', requireAuth, async (req, res) => {
   try {
+    // forceFail / allowSynthetic are test-only — never accept from operational HTTP.
     const result = await syncPermitById(Number(req.params.id), {
-      forceFail: Boolean(req.body?.forceFail),
       officialId: req.body?.officialId,
-      allowSynthetic: Boolean(req.body?.allowSynthetic),
+      allowSynthetic: false,
     });
     rebuildAttention();
     const permit = db.prepare(`${PERMIT_SQL} WHERE p.id = ?`).get(Number(req.params.id));
@@ -1044,7 +1156,7 @@ app.get('/api/contacts/meta', (_req, res) => {
   });
 });
 
-app.post('/api/contacts/provider-mode', (req, res) => {
+app.post('/api/contacts/provider-mode', requireAuth, requireOwner, (req, res) => {
   try {
     const mode = req.body?.mode;
     res.json({ tracerfy: setProviderMode(mode) });
@@ -1053,9 +1165,14 @@ app.post('/api/contacts/provider-mode', (req, res) => {
   }
 });
 
-app.post('/api/contacts', (req, res) => {
+app.post('/api/contacts', requireAuth, (req, res) => {
   try {
     const body = req.body || {};
+    // Strip client-supplied provenance — manual endpoint always assigns manual source.
+    delete body.provider;
+    delete body.provider_source;
+    delete body.record_origin;
+    delete body.validation_state;
     if (body.permit_record_id && body.property_id) {
       const belonging = propertyBelongsToPermit(body.property_id, body.permit_record_id);
       if (!belonging.ok) return res.status(400).json({ error: belonging.error });
@@ -1067,7 +1184,7 @@ app.post('/api/contacts', (req, res) => {
   }
 });
 
-app.post('/api/contacts/:id/status', (req, res) => {
+app.post('/api/contacts/:id/status', requireAuth, (req, res) => {
   try {
     const contact = setContactStatus(Number(req.params.id), req.body?.status, {
       reason: req.body?.reason || '',
@@ -1079,15 +1196,18 @@ app.post('/api/contacts/:id/status', (req, res) => {
   }
 });
 
-app.post('/api/contacts/find', async (req, res) => {
+app.post('/api/contacts/find', requireAuth, async (req, res) => {
   try {
-    // allowSandboxAttach removed — server controls provenance
+    const permitRecordId = req.body?.permit_record_id ? Number(req.body.permit_record_id) : null;
+    // When a permit is selected, always enforce confirmed property association server-side.
+    // Standalone property lookups (no permit_record_id) stay property-level.
+    // Never accept client forceFail / requireConfirmedLink overrides on this route.
     const result = await findContactsForProperty({
       propertyId: Number(req.body?.property_id),
-      permitRecordId: req.body?.permit_record_id ? Number(req.body.permit_record_id) : null,
+      permitRecordId,
       endpointKey: req.body?.endpoint || 'instant_trace',
-      forceFail: req.body?.forceFail || null,
-      requireConfirmedLink: req.body?.requireConfirmedLink !== false,
+      forceFail: null,
+      requireConfirmedLink: Boolean(permitRecordId),
     });
     res.json(result);
   } catch (e) {
@@ -1095,7 +1215,7 @@ app.post('/api/contacts/find', async (req, res) => {
   }
 });
 
-app.post('/api/contacts/jobs/:id/reconcile', (req, res) => {
+app.post('/api/contacts/jobs/:id/reconcile', requireAuth, requireOwner, (req, res) => {
   try {
     res.json(
       reconcileTimedOutJob(Number(req.params.id), {
@@ -1145,7 +1265,7 @@ app.post('/api/milestones/:permitId/waiver/revoke', (req, res) => {
   res.json({ ok: true, readiness: getStoredAssessment(permitId) });
 });
 
-app.post('/api/seed', (req, res) => {
+app.post('/api/seed', requireAuth, requireOwner, (req, res) => {
   const result = seed({ includeDemoProbe: Boolean(req.body?.demo) });
   res.json(result);
 });
@@ -1158,7 +1278,13 @@ if (fs.existsSync(clientDist)) {
   });
 }
 
-const port = Number(process.env.PORT || 4173);
-app.listen(port, () => {
-  console.log(`Permit tracker (workbook-native) on http://localhost:${port}`);
-});
+export { app };
+
+if (process.env.PERMIT_NO_LISTEN !== '1') {
+  const port = Number(process.env.PORT || 4173);
+  app.listen(port, () => {
+    console.log(
+      `Permit Ledger on http://localhost:${port} · auth=${authEnabled() ? 'on' : 'off'} · db=${getDbPath()}`
+    );
+  });
+}

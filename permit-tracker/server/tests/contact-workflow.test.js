@@ -404,14 +404,19 @@ test('export confirmed only; excludes sandbox/rejected; inspect contents', () =>
     status: 'rejected',
     record_origin: 'manual',
   });
-  addManualContact({
-    permit_record_id: permit.id,
-    lot_group_id: permit.lot_group_id,
-    role: 'property_owner',
-    full_name: 'SANDBOX SHOULD NOT EXPORT',
-    status: 'confirmed',
-    record_origin: 'sandbox_demo',
-  });
+  addManualContact(
+    {
+      permit_record_id: permit.id,
+      lot_group_id: permit.lot_group_id,
+      role: 'property_owner',
+      full_name: 'SANDBOX SHOULD NOT EXPORT',
+      status: 'confirmed',
+      record_origin: 'sandbox_demo',
+      provider: 'tracerfy',
+      provider_source: 'hosted_sandbox',
+    },
+    { actor: 'test', allowProviderProvenance: true }
+  );
 
   const buf = exportCoexistenceXlsx({ contactStatuses: ['confirmed'] });
   assert.ok(Buffer.isBuffer(buf) && buf.length > 500);

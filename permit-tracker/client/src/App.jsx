@@ -1,7 +1,11 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 
-async function api(path, options) {
-  const res = await fetch(path, options);
+async function api(path, options = {}) {
+  const headers = {
+    'X-Requested-With': 'PermitLedger',
+    ...(options.headers || {}),
+  };
+  const res = await fetch(path, { credentials: 'same-origin', ...options, headers });
   if (!res.ok) throw new Error((await res.text()) || res.statusText);
   const ct = res.headers.get('content-type') || '';
   if (ct.includes('application/json')) return res.json();
@@ -84,6 +88,8 @@ export default function App() {
   const [discoverUrl, setDiscoverUrl] = useState('');
   const [discoverResult, setDiscoverResult] = useState(null);
   const [busy, setBusy] = useState(false);
+  const [authGate, setAuthGate] = useState(null); // null | { enabled, user }
+  const [loginForm, setLoginForm] = useState({ email: '', password: '' });
 
   const connectors = meta.connectors || [];
 
@@ -475,12 +481,23 @@ export default function App() {
   }
 
   useEffect(() => {
-    api('/api/meta').then(setMeta);
+    (async () => {
+      try {
+        const status = await api('/api/auth/status');
+        setAuthGate({ enabled: status.enabled, user: status.user });
+        if (!status.enabled || status.user) {
+          setMeta(await api('/api/meta'));
+        }
+      } catch (e) {
+        setMessage(String(e.message || e));
+      }
+    })();
   }, []);
 
   useEffect(() => {
+    if (authGate?.enabled && !authGate?.user) return;
     refreshLists().catch((e) => setMessage(String(e.message || e)));
-  }, [q, filters, sort]);
+  }, [q, filters, sort, authGate]);
 
   useEffect(() => {
     if (tab === 'attention') {
@@ -590,13 +607,13 @@ export default function App() {
     }
   }
 
-  async function runSync(id, forceFail = false) {
+  async function runSync(id) {
     setBusy(true);
     try {
       const data = await api(`/api/sync/${id}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ forceFail }),
+        body: JSON.stringify({}),
       });
       setMessage(`Check: ${data.result.outcome}${data.result.mode ? ` (${data.result.mode})` : ''}`);
       await refreshLists();
@@ -681,6 +698,67 @@ export default function App() {
     }
   }
 
+  if (authGate?.enabled && !authGate?.user) {
+    return (
+      <div className="app">
+        <header className="topbar">
+          <div className="brand">
+            <h1>Permit Ledger</h1>
+            <p>Invite-only pilot — sign in with your issued account.</p>
+          </div>
+        </header>
+        <div className="panel stack" style={{ maxWidth: 420, margin: '2rem auto' }}>
+          <h2>Sign in</h2>
+          {message ? <div className="banner">{message}</div> : null}
+          <div className="field">
+            <label htmlFor="login-email">Email</label>
+            <input
+              id="login-email"
+              type="email"
+              autoComplete="username"
+              value={loginForm.email}
+              onChange={(e) => setLoginForm((f) => ({ ...f, email: e.target.value }))}
+            />
+          </div>
+          <div className="field">
+            <label htmlFor="login-password">Password</label>
+            <input
+              id="login-password"
+              type="password"
+              autoComplete="current-password"
+              value={loginForm.password}
+              onChange={(e) => setLoginForm((f) => ({ ...f, password: e.target.value }))}
+            />
+          </div>
+          <button
+            type="button"
+            className="btn primary"
+            disabled={busy}
+            onClick={async () => {
+              setBusy(true);
+              try {
+                const data = await api('/api/auth/login', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify(loginForm),
+                });
+                setAuthGate({ enabled: true, user: data.user });
+                setMeta(await api('/api/meta'));
+                setMessage('');
+              } catch (e) {
+                setMessage(String(e.message || e));
+              } finally {
+                setBusy(false);
+              }
+            }}
+          >
+            Sign in
+          </button>
+        </div>
+      </div>
+    );
+  }
+
   return (
     <div className="app">
       <header className="topbar">
@@ -708,7 +786,29 @@ export default function App() {
             </button>
           ))}
         </nav>
+        {authGate?.user ? (
+          <div className="muted" style={{ marginLeft: 'auto', display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
+            <span>{authGate.user.email}</span>
+            <button
+              type="button"
+              className="btn"
+              onClick={async () => {
+                await api('/api/auth/logout', { method: 'POST' });
+                setAuthGate({ enabled: true, user: null });
+                setMessage('Signed out');
+              }}
+            >
+              Sign out
+            </button>
+          </div>
+        ) : null}
       </header>
+
+      <div className="banner">
+        Trial path: Import workbook → confirm property → retrieve supported official info → optional
+        contacts → review → export → Attention. Building use filter is separate from work type;
+        Unknown when the official label does not state residential/commercial.
+      </div>
 
       <div className="banner warn">
         Fairfax County = live GIS reads (issued-heavy; no pending/comments/holds/inspections).

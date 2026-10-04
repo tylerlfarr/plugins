@@ -305,15 +305,20 @@ test('export excludes sandbox/stale/rejected; cache does not mix modes', async (
     status: 'confirmed',
     record_origin: 'manual',
   });
-  addManualContact({
-    permit_record_id: permit.id,
-    lot_group_id: permit.lot_group_id,
-    role: 'property_owner',
-    full_name: 'Eval Sandbox',
-    status: 'confirmed',
-    record_origin: 'sandbox_demo',
-    provider_source: 'hosted_sandbox',
-  });
+  // Sandbox fixture via provider path — manual HTTP path cannot set sandbox provenance.
+  addManualContact(
+    {
+      permit_record_id: permit.id,
+      lot_group_id: permit.lot_group_id,
+      role: 'property_owner',
+      full_name: 'Eval Sandbox',
+      status: 'confirmed',
+      record_origin: 'sandbox_demo',
+      provider_source: 'hosted_sandbox',
+      provider: 'tracerfy',
+    },
+    { actor: 'test', allowProviderProvenance: true }
+  );
   addManualContact({
     permit_record_id: permit.id,
     lot_group_id: permit.lot_group_id,
