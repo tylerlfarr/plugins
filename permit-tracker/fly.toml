@@ -10,11 +10,14 @@ primary_region = "iad"
 
 [env]
   PORT = "8080"
+  LISTEN_HOST = "0.0.0.0"
   NODE_ENV = "production"
   AUTO_SEED = "0"
   PILOT_AUTH = "1"
   COOKIE_SECURE = "1"
   PERMIT_DB_PATH = "/data/permit-ledger.sqlite"
+  # Do NOT set TRACERFY_API_TOKEN / production gates here — keep production Tracerfy off
+  # until owner explicitly enables via secrets after legal/spend approval.
 
 [http_service]
   internal_port = 8080

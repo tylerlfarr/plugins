@@ -10,6 +10,7 @@ FROM node:20-bookworm-slim
 WORKDIR /app
 ENV NODE_ENV=production \
     PORT=8080 \
+    LISTEN_HOST=0.0.0.0 \
     AUTO_SEED=0 \
     PILOT_AUTH=1 \
     PERMIT_DB_PATH=/data/permit-ledger.sqlite \
