@@ -384,11 +384,30 @@ function failJob(jobId, error, responseJson = null, status = 'failed') {
 }
 
 /**
- * Cache reuse scoped to job mode + current property identity.
- * Excludes rejected/outdated; production jobs never reuse sandbox/fixture contacts.
+ * Cache reuse scoped to job mode + current property identity + originating lookup.
+ * Excludes rejected/outdated/needs_review — old contacts needing review must not
+ * become "current" merely because a new lookup succeeds.
+ * Production jobs never reuse sandbox/fixture contacts.
  */
-function loadCachedContactsForJob(job) {
+function loadCachedContactsForJob(job, property = null) {
   if (!job?.property_id) return [];
+  if (property?.identity_key) {
+    let reqIdentity = null;
+    try {
+      const req = JSON.parse(job.request_json || '{}');
+      // Fingerprint input is stored; compare live property fields to request
+      const liveAddr = String(property.site_address || '').trim().toLowerCase();
+      const reqAddr = String(req.address || '').trim().toLowerCase();
+      const liveParcel = String(property.parcel_apn || '').trim().toLowerCase();
+      const reqParcel = String(req.parcel_id || '').trim().toLowerCase();
+      if (req.address != null && liveAddr && reqAddr && liveAddr !== reqAddr) return [];
+      if (req.parcel_id != null && liveParcel && reqParcel && liveParcel !== reqParcel) return [];
+      reqIdentity = property.identity_key;
+    } catch {
+      /* keep going with property_id scope */
+    }
+    void reqIdentity;
+  }
   const origins =
     job.mode === PROVIDER_MODES.PRODUCTION
       ? ['provider']
@@ -400,7 +419,7 @@ function loadCachedContactsForJob(job) {
       `SELECT * FROM contacts
        WHERE property_id = ?
          AND provider = 'tracerfy'
-         AND status NOT IN ('rejected','outdated')
+         AND status NOT IN ('rejected','outdated','needs_review')
          AND record_origin IN (${origins.map(() => '?').join(',')})
        ORDER BY id`
     )
@@ -502,6 +521,7 @@ export async function runContactLookup({
     endpointKey,
     mode: cfg.mode,
     property_id: property.id,
+    identity_key: property.identity_key || '',
     input,
   });
 
@@ -539,7 +559,7 @@ export async function runContactLookup({
     )
     .get(fingerprint);
   if (existing && existing.status === 'succeeded') {
-    const cached = loadCachedContactsForJob(existing);
+    const cached = loadCachedContactsForJob(existing, property);
     let contacts = cached.map((c) => ({
       role: c.role,
       full_name: c.full_name,

@@ -756,6 +756,17 @@ export default function App() {
               <option value="done">done</option>
             </select>
             <select
+              value={filters.use_classification || ''}
+              onChange={(e) => setFilters((f) => ({ ...f, use_classification: e.target.value }))}
+              title="Building use — separate from work type (new/alteration/demolition)"
+            >
+              <option value="">Use (all)</option>
+              <option value="residential">Residential</option>
+              <option value="commercial">Commercial</option>
+              <option value="mixed_use">Mixed-use</option>
+              <option value="unknown">Unknown</option>
+            </select>
+            <select
               value={filters.readiness_state || ''}
               onChange={(e) => setFilters((f) => ({ ...f, readiness_state: e.target.value }))}
             >
@@ -864,10 +875,54 @@ export default function App() {
                 </option>
               ))}
             </select>
-            <a className="btn" href="/api/export.xlsx" title="Confirmed contacts only; sandbox/rejected excluded">
+            <button
+              type="button"
+              className="btn"
+              disabled={busy}
+              title="Save current filters (including building use)"
+              onClick={async () => {
+                const name = window.prompt('Name this filter set');
+                if (!name) return;
+                setBusy(true);
+                try {
+                  const definition = { q, ...filters };
+                  await api('/api/filters', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ name, definition }),
+                  });
+                  setMessage(`Saved filter “${name}”`);
+                  await refreshLists();
+                } catch (err) {
+                  setMessage(String(err.message || err));
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              Save filters
+            </button>
+            <a
+              className="btn"
+              href={`/api/export.xlsx?${new URLSearchParams(
+                Object.fromEntries(
+                  Object.entries(filters).filter(([, v]) => v != null && String(v) !== '')
+                )
+              )}`}
+              title="Confirmed contacts only; sandbox/rejected excluded. Honors current use/location/status filters."
+            >
               Structured export
             </a>
-            <a className="btn" href="/api/export.xlsx?includeReviewed=1" title="Confirmed + reviewed candidates">
+            <a
+              className="btn"
+              href={`/api/export.xlsx?${new URLSearchParams({
+                includeReviewed: '1',
+                ...Object.fromEntries(
+                  Object.entries(filters).filter(([, v]) => v != null && String(v) !== '')
+                ),
+              })}`}
+              title="Confirmed + reviewed candidates. Honors current use/location/status filters."
+            >
               Export + reviewed
             </a>
             <button type="button" className="btn primary" disabled={busy} onClick={syncFairfaxShaped}>
@@ -906,6 +961,7 @@ export default function App() {
                     <th onClick={() => toggleSort('community_name')}>Community / Lot</th>
                     <th onClick={() => toggleSort('primary_official_id')}>Official IDs</th>
                     <th onClick={() => toggleSort('official_status')}>Official</th>
+                    <th onClick={() => toggleSort('use_classification')}>Use</th>
                     <th onClick={() => toggleSort('readiness_state')}>Lot readiness</th>
                     <th onClick={() => toggleSort('internal_status')}>Internal</th>
                     <th>Check</th>
@@ -960,6 +1016,16 @@ export default function App() {
                       <td>
                         <div>{p.official_status}</div>
                         <div className="muted mono">{p.source_native_status || '—'}</div>
+                      </td>
+                      <td>
+                        <div>
+                          {meta.useClassLabels?.[p.use_classification] ||
+                            p.use_classification ||
+                            'Unknown'}
+                        </div>
+                        <div className="muted mono">
+                          {(p.use_classification_source || 'unknown_default').replace(/_/g, ' ')}
+                        </div>
                       </td>
                       <td>
                         <span className={`pill ${readinessClass(p.readiness_state)}`}>
@@ -1017,6 +1083,54 @@ export default function App() {
                     <div className="field">
                       <label>Source-native status (connector · read-only)</label>
                       <input readOnly value={detail.source_native_status ?? ''} />
+                    </div>
+                    <div className="field">
+                      <label>Building use (≠ work type)</label>
+                      <div className="mono">
+                        {detail.use_classification || 'unknown'}
+                        <span className="muted">
+                          {' '}
+                          · source {detail.use_classification_source || 'unknown_default'}
+                        </span>
+                      </div>
+                      {detail.use_classification_official_label ? (
+                        <div className="muted">
+                          Official label: {detail.use_classification_official_label}
+                        </div>
+                      ) : (
+                        <div className="muted">No explicit official use label — Unknown unless overridden</div>
+                      )}
+                      <select
+                        value={detail.use_classification_manual || ''}
+                        onChange={async (e) => {
+                          const v = e.target.value;
+                          setBusy(true);
+                          try {
+                            const data = await api(`/api/permits/${detail.id}/use-classification`, {
+                              method: 'POST',
+                              headers: { 'Content-Type': 'application/json' },
+                              body: JSON.stringify(v ? { use_classification: v } : { clear: true }),
+                            });
+                            setDetail({ ...detail, ...data.permit });
+                            setMessage(
+                              v
+                                ? `Manual use override: ${v} (survives later sync)`
+                                : 'Cleared manual use override'
+                            );
+                            await refreshLists();
+                          } catch (err) {
+                            setMessage(String(err.message || err));
+                          } finally {
+                            setBusy(false);
+                          }
+                        }}
+                      >
+                        <option value="">No manual override</option>
+                        <option value="residential">Override → Residential</option>
+                        <option value="commercial">Override → Commercial</option>
+                        <option value="mixed_use">Override → Mixed-use</option>
+                        <option value="unknown">Override → Unknown</option>
+                      </select>
                     </div>
                     <div className="field full">
                       <label>Notes (from workbook col S — preserved)</label>

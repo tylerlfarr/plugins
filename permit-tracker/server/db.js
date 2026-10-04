@@ -13,6 +13,14 @@ export const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
+export function getDbPath() {
+  return dbPath;
+}
+
+export function getDataDir() {
+  return path.dirname(dbPath);
+}
+
 function addColumn(table, column, ddl) {
   const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
   if (!cols.includes(column)) {
@@ -64,6 +72,13 @@ export function migrate() {
       jurisdiction_source TEXT NOT NULL DEFAULT 'unresolved',
       jurisdiction_confirmed INTEGER NOT NULL DEFAULT 0,
       permit_kind TEXT DEFAULT 'building',
+      use_classification TEXT NOT NULL DEFAULT 'unknown',
+      use_classification_official TEXT NOT NULL DEFAULT 'unknown',
+      use_classification_official_label TEXT NOT NULL DEFAULT '',
+      use_classification_source TEXT NOT NULL DEFAULT 'unknown_default',
+      use_classification_manual TEXT,
+      use_classification_manual_by TEXT,
+      use_classification_manual_at TEXT,
       source_native_status TEXT DEFAULT '',
       official_status TEXT DEFAULT 'unknown',
       internal_status TEXT NOT NULL DEFAULT 'watching',
@@ -494,6 +509,25 @@ export function migrate() {
   addColumn('provider_usage', 'charge_kind', "charge_kind TEXT NOT NULL DEFAULT 'actual'");
   addColumn('milestone_waivers', 'revoked_at', 'revoked_at TEXT');
   addColumn('milestone_waivers', 'revoked_by', 'revoked_by TEXT');
+  addColumn('permit_records', 'use_classification', "use_classification TEXT NOT NULL DEFAULT 'unknown'");
+  addColumn(
+    'permit_records',
+    'use_classification_official',
+    "use_classification_official TEXT NOT NULL DEFAULT 'unknown'"
+  );
+  addColumn(
+    'permit_records',
+    'use_classification_official_label',
+    "use_classification_official_label TEXT NOT NULL DEFAULT ''"
+  );
+  addColumn(
+    'permit_records',
+    'use_classification_source',
+    "use_classification_source TEXT NOT NULL DEFAULT 'unknown_default'"
+  );
+  addColumn('permit_records', 'use_classification_manual', 'use_classification_manual TEXT');
+  addColumn('permit_records', 'use_classification_manual_by', 'use_classification_manual_by TEXT');
+  addColumn('permit_records', 'use_classification_manual_at', 'use_classification_manual_at TEXT');
 
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_lot_stable ON lot_groups(stable_key) WHERE stable_key != ''`);
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_property_identity ON properties(identity_key) WHERE identity_key != ''`);

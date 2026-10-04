@@ -129,11 +129,15 @@ export function seed({ preferWorkbook = true, includeDemoProbe = false } = {}) {
       `INSERT INTO saved_filters(name, definition) VALUES
        ('Needs follow-up', ?),
        ('Has official ID', ?),
-       ('Fairfax-shaped IDs', ?)`
+       ('Fairfax-shaped IDs', ?),
+       ('Residential use', ?),
+       ('Use unknown (needs review)', ?)`
     ).run(
       JSON.stringify({ internal_status: 'needs_followup' }),
       JSON.stringify({ has_official_id: true }),
-      JSON.stringify({ fairfax_shaped: true })
+      JSON.stringify({ fairfax_shaped: true }),
+      JSON.stringify({ use_classification: 'residential' }),
+      JSON.stringify({ use_classification: 'unknown' })
     );
     rebuildAttention();
     console.log('Seeded from source workbook:', usedWorkbook, summary, wantDemo ? '(+demo probe)' : '');

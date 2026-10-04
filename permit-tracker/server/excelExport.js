@@ -12,10 +12,39 @@ import { db } from './db.js';
 export function exportCoexistenceXlsx({
   contactStatuses = ['confirmed'],
   includeReviewedCandidates = false,
+  filters = {},
 } = {}) {
   const statuses = includeReviewedCandidates
     ? [...new Set([...contactStatuses, 'candidate'])]
     : contactStatuses;
+
+  // Optional permit filters (same knobs as Permits view: use, jurisdiction, status, date-ish).
+  let where = `p.record_origin = 'import'`;
+  const params = [];
+  if (filters.use_classification) {
+    where += ' AND p.use_classification = ?';
+    params.push(String(filters.use_classification));
+  }
+  if (filters.jurisdiction_code) {
+    where += ' AND p.jurisdiction_code = ?';
+    params.push(String(filters.jurisdiction_code));
+  }
+  if (filters.internal_status) {
+    where += ' AND p.internal_status = ?';
+    params.push(String(filters.internal_status));
+  }
+  if (filters.official_status) {
+    where += ' AND p.official_status = ?';
+    params.push(String(filters.official_status));
+  }
+  if (filters.readiness_state) {
+    where += ' AND p.readiness_state = ?';
+    params.push(String(filters.readiness_state));
+  }
+  if (filters.approaching_start === 'true' || filters.approaching_start === true) {
+    where += ` AND ra.target_start IS NOT NULL AND ra.days_to_start IS NOT NULL
+               AND ra.days_to_start >= 0 AND ra.days_to_start <= 45`;
+  }
 
   const permitRows = db
     .prepare(
@@ -40,6 +69,12 @@ export function exportCoexistenceXlsx({
          p.source_native_status,
          p.official_status,
          p.internal_status,
+         p.permit_kind,
+         p.use_classification,
+         p.use_classification_official,
+         p.use_classification_official_label,
+         p.use_classification_source,
+         p.use_classification_manual,
          p.owner,
          p.next_action,
          p.next_action_due,
@@ -53,10 +88,10 @@ export function exportCoexistenceXlsx({
        JOIN lot_groups lg ON lg.id = p.lot_group_id
        JOIN community_sections cs ON cs.id = lg.section_id
        LEFT JOIN readiness_assessments ra ON ra.permit_record_id = p.id
-       WHERE p.record_origin = 'import'
+       WHERE ${where}
        ORDER BY cs.community_name, lg.lot_label, p.id`
     )
-    .all();
+    .all(...params);
 
   const milestoneStmt = db.prepare(
     `SELECT key, label, value, value_kind FROM internal_milestones WHERE permit_record_id = ? ORDER BY key`
@@ -103,6 +138,12 @@ export function exportCoexistenceXlsx({
       source_native_status: r.source_native_status,
       official_status: r.official_status,
       internal_status: r.internal_status,
+      work_type_permit_kind: r.permit_kind,
+      use_classification: r.use_classification,
+      use_classification_official: r.use_classification_official,
+      use_classification_official_label: r.use_classification_official_label,
+      use_classification_source: r.use_classification_source,
+      use_classification_manual: r.use_classification_manual,
       owner: r.owner,
       next_action: r.next_action,
       next_action_due: r.next_action_due,

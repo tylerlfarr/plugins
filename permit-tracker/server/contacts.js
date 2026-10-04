@@ -48,13 +48,25 @@ export function listContacts({
   return db.prepare(sql).all(...params);
 }
 
-export function addManualContact(fields, { actor = 'ui' } = {}) {
+export function addManualContact(fields, { actor = 'ui', allowProviderProvenance = false } = {}) {
   const role = CONTACT_ROLES.includes(fields.role) ? fields.role : 'unknown_party';
   // Internal assignees are labeled distinctly from property owners / external parties
   const notes =
     role === 'internal_assignee'
       ? `${fields.notes || ''} | INTERNAL_ASSIGNEE — not a property owner/external party`.trim()
       : fields.notes || `added by ${actor}`;
+
+  // Manual UI/API path must not impersonate Tracerfy or mark fabricated as provider-sourced.
+  // Provider attach path passes allowProviderProvenance=true.
+  const provider = allowProviderProvenance ? fields.provider || 'tracerfy' : 'manual';
+  const provider_source = allowProviderProvenance
+    ? fields.provider_source || 'tracerfy_live'
+    : 'user_entered';
+  const record_origin = allowProviderProvenance ? fields.record_origin || 'provider' : 'manual';
+  const validation_state = allowProviderProvenance
+    ? fields.validation_state || 'provider_returned'
+    : 'user_confirmed';
+
   const info = db
     .prepare(
       `INSERT INTO contacts(
@@ -73,14 +85,14 @@ export function addManualContact(fields, { actor = 'ui' } = {}) {
       fields.phone || '',
       fields.email || '',
       fields.mailing_address || '',
-      fields.provider || 'manual',
-      fields.provider_source || 'user_entered',
-      fields.validation_state || 'user_confirmed',
-      fields.status || 'confirmed',
+      provider,
+      provider_source,
+      validation_state,
+      fields.status || (allowProviderProvenance ? 'candidate' : 'confirmed'),
       JSON.stringify(fields.restriction_flags || []),
       JSON.stringify(fields.phone_candidates || []),
       JSON.stringify(fields.email_candidates || []),
-      fields.record_origin || 'manual',
+      record_origin,
       notes
     );
   return db.prepare('SELECT * FROM contacts WHERE id = ?').get(Number(info.lastInsertRowid));
@@ -130,7 +142,7 @@ export async function findContactsForProperty({
   propertyId,
   permitRecordId = null,
   endpointKey = 'instant_trace',
-  forceFail = null,
+  forceFail = null, // tests only — never accept from operational HTTP
   requireConfirmedLink = true,
 } = {}) {
   const property = getProperty(propertyId);
@@ -267,7 +279,7 @@ export async function findContactsForProperty({
               ? `${String(cfg.mode).toUpperCase()} DEMO CONTACT — not operational`
               : '',
         },
-        { actor: 'provider' }
+        { actor: 'provider', allowProviderProvenance: true }
       );
       db.prepare(
         `UPDATE contacts SET validation_state = 'provider_returned', retrieved_at = datetime('now') WHERE id = ?`

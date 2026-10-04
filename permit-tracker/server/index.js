@@ -64,6 +64,12 @@ import {
   reconcileTimedOutJob,
 } from './contacts.js';
 import { setProviderMode, PROVIDER_MODES } from './providers/tracerfy.js';
+import {
+  USE_CLASSES,
+  USE_CLASS_LABELS,
+  USE_SOURCES,
+  setManualUseOverride,
+} from './useClassification.js';
 import XLSX from 'xlsx';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -110,10 +116,36 @@ app.get('/api/meta', (_req, res) => {
     connectors: listConnectors(),
     fairfaxFieldAvailability: FAIRFAX_FIELD_AVAILABILITY,
     readinessRulesetKey: rules.key,
+    useClasses: USE_CLASSES,
+    useClassLabels: USE_CLASS_LABELS,
+    useSources: USE_SOURCES,
+    useClassificationNote:
+      'Use (residential/commercial/mixed/unknown) is separate from work type. Official labels preferred; unreliable → Unknown. Manual override survives later syncs.',
     productPromise:
       'Automatically run specific permit checks for communities/lots, preserve internal spreadsheet workflow, show what changed before morning meeting.',
     importProfile: 'source workbook (employer-specific mapping separate from reusable core)',
   });
+});
+
+app.post('/api/permits/:id/use-classification', (req, res) => {
+  try {
+    const permitId = Number(req.params.id);
+    const { use_classification, clear } = req.body || {};
+    const updated = setManualUseOverride(db, permitId, clear ? '' : use_classification, {
+      actor: currentUser(),
+    });
+    recordChange(
+      permitId,
+      'use_classification_manual',
+      '',
+      clear ? '' : use_classification,
+      currentUser(),
+      'ui'
+    );
+    res.json({ permit: updated });
+  } catch (e) {
+    res.status(400).json({ error: String(e.message || e) });
+  }
 });
 
 app.post('/api/settings', (req, res) => {
@@ -157,6 +189,7 @@ app.get('/api/permits', (req, res) => {
     contact_review_needed,
     has_official_id,
     fairfax_shaped,
+    use_classification,
     include_demo,
     sort = 'updated_at',
     dir = 'desc',
@@ -170,6 +203,7 @@ app.get('/api/permits', (req, res) => {
     'readiness_state',
     'next_action_due',
     'primary_official_id',
+    'use_classification',
   ]);
   const sortCol = allowed.has(String(sort)) ? String(sort) : 'updated_at';
   const sortDir = String(dir).toLowerCase() === 'asc' ? 'ASC' : 'DESC';
@@ -206,6 +240,10 @@ app.get('/api/permits', (req, res) => {
   if (internal_status) {
     sql += ' AND p.internal_status = ?';
     params.push(internal_status);
+  }
+  if (use_classification) {
+    sql += ' AND p.use_classification = ?';
+    params.push(use_classification);
   }
   if (readiness_state) {
     sql += ' AND p.readiness_state = ?';
@@ -757,9 +795,21 @@ app.post('/api/import/gospel/store', (_req, res) => {
 
 app.get('/api/export.xlsx', (req, res) => {
   const includeReviewed = req.query.includeReviewed === '1' || req.query.includeReviewed === 'true';
+  const filters = {};
+  for (const key of [
+    'use_classification',
+    'jurisdiction_code',
+    'internal_status',
+    'official_status',
+    'readiness_state',
+    'approaching_start',
+  ]) {
+    if (req.query[key]) filters[key] = String(req.query[key]);
+  }
   const buf = exportCoexistenceXlsx({
     contactStatuses: ['confirmed'],
     includeReviewedCandidates: includeReviewed,
+    filters,
   });
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', 'attachment; filename="permit-ledger-structured-export.xlsx"');

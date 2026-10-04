@@ -13,6 +13,7 @@ import {
   getStoredAssessment,
   READINESS_STATES,
 } from './readiness.js';
+import { applyOfficialUseToPermit } from './useClassification.js';
 
 const OFFICIAL_DATE_FIELDS = [
   ['submittedDate', 'submitted_date'],
@@ -201,6 +202,39 @@ export function applyConnectorResult(permit, result, changedBy = 'connector', qu
     sets.push('source_url = ?');
     params.push(fields.sourceUrl);
     changed = true;
+  }
+
+  // Use classification from official permit type label (not ID prefixes). Manual override preserved.
+  if (fields.permitType || fields.useClassificationLabel) {
+    const beforeUse = permit.use_classification;
+    const beforeSrc = permit.use_classification_source;
+    const updated = applyOfficialUseToPermit(
+      db,
+      permit.id,
+      fields.useClassificationLabel || fields.permitType,
+      { actor: changedBy }
+    );
+    if (
+      updated &&
+      (String(beforeUse) !== String(updated.use_classification) ||
+        String(beforeSrc) !== String(updated.use_classification_source) ||
+        String(permit.use_classification_official_label || '') !==
+          String(updated.use_classification_official_label || ''))
+    ) {
+      recordChange(
+        permit.id,
+        'use_classification',
+        beforeUse,
+        updated.use_classification,
+        changedBy,
+        'connector'
+      );
+      changed = true;
+      // Refresh local permit snapshot for subsequent reads in this function
+      permit.use_classification = updated.use_classification;
+      permit.use_classification_source = updated.use_classification_source;
+      permit.use_classification_official_label = updated.use_classification_official_label;
+    }
   }
 
   const outcome = changed ? 'updated' : 'no_change';
