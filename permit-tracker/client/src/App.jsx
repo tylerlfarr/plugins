@@ -12,6 +12,7 @@ const TABS = [
   { id: 'permits', label: 'Permits' },
   { id: 'attention', label: 'Attention' },
   { id: 'import', label: 'Import' },
+  { id: 'sources', label: 'Sources' },
   { id: 'connectors', label: 'Connectors' },
 ];
 
@@ -35,6 +36,17 @@ export default function App() {
   const [importPreview, setImportPreview] = useState(null);
   const [schedule, setSchedule] = useState(null);
   const [conflicts, setConflicts] = useState([]);
+  const [sources, setSources] = useState([]);
+  const [connectForm, setConnectForm] = useState({
+    state: 'VA',
+    county: '',
+    city: '',
+    record_type: 'building',
+    portal_url: '',
+  });
+  const [connectResult, setConnectResult] = useState(null);
+  const [discoverUrl, setDiscoverUrl] = useState('');
+  const [discoverResult, setDiscoverResult] = useState(null);
   const [busy, setBusy] = useState(false);
 
   const connectors = meta.connectors || [];
@@ -80,7 +92,62 @@ export default function App() {
         }
       );
     }
+    if (tab === 'sources') {
+      api('/api/sources').then((d) => setSources(d.sources || []));
+    }
   }, [tab]);
+
+  async function runConnectLocation() {
+    setBusy(true);
+    try {
+      const data = await api('/api/connect-location', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(connectForm),
+      });
+      setConnectResult(data);
+      setMessage(data.message || data.status);
+    } catch (e) {
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function runDiscover() {
+    if (!discoverUrl) return;
+    setBusy(true);
+    try {
+      const data = await api('/api/discover/arcgis', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: discoverUrl }),
+      });
+      setDiscoverResult(data.result);
+      setMessage(`Discovery: ${data.result.state}`);
+    } catch (e) {
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function activateSourceKey(key) {
+    setBusy(true);
+    try {
+      await api(`/api/sources/${key}/activate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ reviewedBy: 'ui.reviewer' }),
+      });
+      setSources((await api('/api/sources')).sources);
+      setMessage(`Activated ${key} after review`);
+    } catch (e) {
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   const selectedIds = useMemo(() => [...selected], [selected]);
 
@@ -644,6 +711,136 @@ export default function App() {
               Upload a workbook to preview sections, or import the store source workbook.
             </p>
           )}
+        </div>
+      )}
+
+      {tab === 'sources' && (
+        <div className="panel stack">
+          <h2>Connect a location</h2>
+          <p className="muted">
+            Choose state + county/city and record type. Verified sources show first; discovery
+            candidates need review before activation. Counties do not auto-connect.
+          </p>
+          <div className="toolbar">
+            <input
+              placeholder="State"
+              value={connectForm.state}
+              onChange={(e) => setConnectForm((f) => ({ ...f, state: e.target.value }))}
+            />
+            <input
+              placeholder="County"
+              value={connectForm.county}
+              onChange={(e) => setConnectForm((f) => ({ ...f, county: e.target.value }))}
+            />
+            <input
+              placeholder="City / town (optional)"
+              value={connectForm.city}
+              onChange={(e) => setConnectForm((f) => ({ ...f, city: e.target.value }))}
+            />
+            <select
+              value={connectForm.record_type}
+              onChange={(e) => setConnectForm((f) => ({ ...f, record_type: e.target.value }))}
+            >
+              <option value="building">building</option>
+              <option value="zoning">zoning</option>
+              <option value="planning">planning</option>
+              <option value="inspections">inspections</option>
+            </select>
+          </div>
+          <div className="toolbar">
+            <input
+              style={{ minWidth: '16rem', flex: 1 }}
+              placeholder="Optional official ArcGIS / portal URL"
+              value={connectForm.portal_url}
+              onChange={(e) => setConnectForm((f) => ({ ...f, portal_url: e.target.value }))}
+            />
+            <button type="button" className="btn primary" disabled={busy} onClick={runConnectLocation}>
+              Connect location
+            </button>
+          </div>
+          {connectResult ? (
+            <div className={`attention-item ${connectResult.status}`}>
+              <strong>{connectResult.status}</strong>
+              <div>{connectResult.message}</div>
+              <div className="muted">autoConnect={String(connectResult.autoConnect)}</div>
+              {(connectResult.namedLimits || []).slice(0, 6).map((l) => (
+                <div key={l} className="muted">
+                  · {l}
+                </div>
+              ))}
+              <h3>Verified</h3>
+              <ul className="history">
+                {(connectResult.verifiedSources || []).map((s) => (
+                  <li key={s.key}>
+                    <span className="mono">{s.key}</span> · {s.state}
+                    {s.activated ? ' · activated' : ''}
+                    {!s.activated && s.state === 'verified' ? (
+                      <>
+                        {' '}
+                        <button type="button" className="btn" disabled={busy} onClick={() => activateSourceKey(s.key)}>
+                          Review & activate
+                        </button>
+                      </>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+              <h3>Candidates / unsupported</h3>
+              <ul className="history">
+                {[...(connectResult.candidates || []), ...(connectResult.unsupportedSources || [])]
+                  .slice(0, 12)
+                  .map((s) => (
+                    <li key={s.key || s.endpoint}>
+                      <span className="mono">{s.key || 'discovery'}</span> · {s.state}
+                      <div className="muted">{s.coverage_limitations || (s.limitations || []).join('; ')}</div>
+                    </li>
+                  ))}
+              </ul>
+            </div>
+          ) : null}
+
+          <h2>Source registry</h2>
+          <p className="muted">Verified vs speculative kept separate. ArcGIS ≠ automatically supported.</p>
+          {sources.map((s) => (
+            <div key={s.key} className="attention-item">
+              <div>
+                <strong>{s.key}</strong>{' '}
+                <span className={`pill ${s.state === 'verified' ? 'live' : 'warn'}`}>{s.state}</span>
+                {s.activated ? <span className="pill live">activated</span> : null}
+              </div>
+              <div className="mono">
+                {s.jurisdiction_code} · {s.platform} · {s.adapter_type}
+              </div>
+              <div>{s.coverage_limitations}</div>
+              <div className="muted mono">{s.endpoint}</div>
+            </div>
+          ))}
+
+          <h2>Inspect ArcGIS URL</h2>
+          <div className="toolbar">
+            <input
+              style={{ minWidth: '16rem', flex: 1 }}
+              placeholder="FeatureServer or MapServer layer URL"
+              value={discoverUrl}
+              onChange={(e) => setDiscoverUrl(e.target.value)}
+            />
+            <button type="button" className="btn" disabled={busy} onClick={runDiscover}>
+              Inspect
+            </button>
+          </div>
+          {discoverResult ? (
+            <div className="attention-item">
+              <strong>
+                {discoverResult.state} · {discoverResult.platform}
+              </strong>
+              <div className="muted mono">{discoverResult.endpoint}</div>
+              <div>Proposed mappings: {JSON.stringify(discoverResult.proposedMappings)}</div>
+              <div className="muted">
+                {(discoverResult.limitations || []).join(' · ') || 'No limitations noted'}
+              </div>
+              <div className="muted">{discoverResult.note}</div>
+            </div>
+          ) : null}
         </div>
       )}
 

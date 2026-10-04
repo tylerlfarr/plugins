@@ -56,7 +56,7 @@ test('sanitized fixture parses 8 sheets and two sections', () => {
   assert.ok(range);
 });
 
-test('confirmed jurisdiction wins; BLDC stays ambiguous without confirmation', () => {
+test('utility geography suggests AHJ; BLDC ambiguous without confirmation', () => {
   const pwc = db
     .prepare(
       `SELECT jurisdiction_code, jurisdiction_confirmed, jurisdiction_source FROM permit_records
@@ -64,20 +64,21 @@ test('confirmed jurisdiction wins; BLDC stays ambiguous without confirmation', (
     )
     .get();
   assert.equal(pwc.jurisdiction_code, 'prince_william_county');
-  assert.equal(pwc.jurisdiction_confirmed, 1);
+  assert.equal(pwc.jurisdiction_confirmed, 0);
+  assert.match(pwc.jurisdiction_source, /suggestion/);
 
   const bldc = suggestJurisdictionFromId('BLDC-2026-040694');
   assert.equal(bldc.confidence, 'ambiguous');
 
-  // Section confirmed Loudoun → BLDC inherits confirmed LoCo
+  // Section LoCo Water suggests Loudoun — not operator-confirmed
   const loudoun = db
     .prepare(
-      `SELECT jurisdiction_code, jurisdiction_confirmed FROM permit_records
+      `SELECT jurisdiction_code, jurisdiction_confirmed, jurisdiction_source FROM permit_records
        WHERE primary_official_id = 'BLDC-2026-040694'`
     )
     .get();
   assert.equal(loudoun.jurisdiction_code, 'loudoun_county');
-  assert.equal(loudoun.jurisdiction_confirmed, 1);
+  assert.equal(loudoun.jurisdiction_confirmed, 0);
 });
 
 test('stable identity: first ID on existing shell is attach, not duplicate project', () => {

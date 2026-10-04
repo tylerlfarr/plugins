@@ -1,16 +1,16 @@
 /**
  * Source-workbook import profile — separate from reusable core.
- * Confirmed jurisdiction mappings are evidence-based from sheet headers
- * (e.g. "LoCo Water", "PW W/S"), not employee names.
+ *
+ * Utility/geography headers (LoCo Water, PW W/S) suggest county geography,
+ * they do NOT confirm the building/zoning AHJ for every record type.
+ * Confirmed AHJ requires explicit evidence or operator confirmation.
  */
 
-/** Project codes → confirmed jurisdiction when workbook headers prove AHJ. */
-export const CONFIRMED_PROJECT_JURISDICTIONS = {
-  // Loudoun — LoCo Water columns / Cascades blocks
+/** Project codes → suggested geography (not confirmed AHJ). */
+export const SUGGESTED_PROJECT_GEOGRAPHY = {
   CAM1: 'loudoun_county',
   CAM2: 'loudoun_county',
   LE2: 'loudoun_county',
-  // Prince William — PW water/sewer, MST/BPR patterns in section headers
   BSO1: 'prince_william_county',
   IN1: 'prince_william_county',
   'IN1 sec. 4': 'prince_william_county',
@@ -26,11 +26,40 @@ export const CONFIRMED_PROJECT_JURISDICTIONS = {
   COB3: 'prince_william_county',
 };
 
-/** Header-text signals that confirm jurisdiction for a section. */
+/**
+ * Infer jurisdiction suggestion from section headers.
+ * Returns confirmed=1 only for explicit AHJ naming (not utility columns alone).
+ */
 export function confirmJurisdictionFromHeaders(headers, permitTimeNote, projectCode) {
   const blob = `${JSON.stringify(headers)} ${permitTimeNote} ${projectCode}`.toLowerCase();
+
+  // Explicit AHJ naming — rare in this workbook; still suggestion unless operator confirms
+  if (blob.includes('city of fairfax')) {
+    return {
+      code: 'city_of_fairfax',
+      source: 'header_suggestion',
+      confirmed: 0,
+      authority_note: 'City of Fairfax named explicitly — still needs operator confirm for building AHJ',
+    };
+  }
+  if (blob.includes('fairfax county') || blob.includes('ffx county')) {
+    return {
+      code: 'fairfax_county',
+      source: 'header_suggestion',
+      confirmed: 0,
+      authority_note: 'Fairfax County named — operator confirm before treating as confirmed AHJ',
+    };
+  }
+
+  // Utility / geography signals — suggest only
   if (blob.includes('loco') || blob.includes('loudoun')) {
-    return { code: 'loudoun_county', source: 'confirmed_mapping', confirmed: 1 };
+    return {
+      code: 'loudoun_county',
+      source: 'utility_geography_suggestion',
+      confirmed: 0,
+      authority_note:
+        'LoCo Water / Loudoun geography in headers suggests Loudoun County; not confirmed building/zoning AHJ (towns may differ by record type)',
+    };
   }
   if (
     blob.includes('pw w') ||
@@ -39,33 +68,40 @@ export function confirmJurisdictionFromHeaders(headers, permitTimeNote, projectC
     blob.includes('prince william') ||
     /\bpw\b/.test(blob)
   ) {
-    return { code: 'prince_william_county', source: 'confirmed_mapping', confirmed: 1 };
-  }
-  if (blob.includes('fairfax county') || blob.includes('ffx county')) {
-    return { code: 'fairfax_county', source: 'confirmed_mapping', confirmed: 1 };
-  }
-  // City of Fairfax must be explicit — never infer from "Fairfax" alone in ambiguous text
-  if (blob.includes('city of fairfax')) {
-    return { code: 'city_of_fairfax', source: 'confirmed_mapping', confirmed: 1 };
-  }
-
-  const byCode = CONFIRMED_PROJECT_JURISDICTIONS[projectCode];
-  if (byCode) {
-    return { code: byCode, source: 'confirmed_mapping', confirmed: 1 };
-  }
-
-  // Normalize project code variants
-  const base = String(projectCode || '').split(/\s+/)[0];
-  if (CONFIRMED_PROJECT_JURISDICTIONS[base]) {
     return {
-      code: CONFIRMED_PROJECT_JURISDICTIONS[base],
-      source: 'confirmed_mapping',
-      confirmed: 1,
+      code: 'prince_william_county',
+      source: 'utility_geography_suggestion',
+      confirmed: 0,
+      authority_note:
+        'PW water/sewer geography suggests Prince William County; not confirmed building/zoning AHJ for every record',
     };
   }
 
-  return { code: 'unresolved', source: 'unresolved', confirmed: 0 };
+  const byCode = SUGGESTED_PROJECT_GEOGRAPHY[projectCode];
+  if (byCode) {
+    return {
+      code: byCode,
+      source: 'project_code_suggestion',
+      confirmed: 0,
+      authority_note: 'Project-code geography suggestion from import profile — not operator-confirmed AHJ',
+    };
+  }
+
+  const base = String(projectCode || '').split(/\s+/)[0];
+  if (SUGGESTED_PROJECT_GEOGRAPHY[base]) {
+    return {
+      code: SUGGESTED_PROJECT_GEOGRAPHY[base],
+      source: 'project_code_suggestion',
+      confirmed: 0,
+      authority_note: 'Project-code geography suggestion from import profile — not operator-confirmed AHJ',
+    };
+  }
+
+  return { code: 'unresolved', source: 'unresolved', confirmed: 0, authority_note: '' };
 }
+
+/** @deprecated alias — name kept for call sites; does not confirm AHJ */
+export const CONFIRMED_PROJECT_JURISDICTIONS = SUGGESTED_PROJECT_GEOGRAPHY;
 
 export const ARCHIVED_SHEETS = [
   'Indirect Cost',

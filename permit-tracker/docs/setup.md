@@ -27,13 +27,18 @@ Default candidates (first hit wins):
 ## Tests
 
 ```bash
-npm test                 # offline integrity fixtures + optional live workbook if present
-npm run coverage:report  # live Fairfax coverage; writes docs/coverage-*.md/json
-npm run fixture:build    # regenerate sanitized xlsx under server/fixtures/
+npm test                 # offline integrity + discovery + optional live workbook
+npm run test:live        # Fairfax controlled demo + coverage (network)
+npm run coverage:report  # import-origin coverage only (excludes demo/fixtures/injected)
+npm run investigate:idless
+npm run demo:fairfax-attention   # labeled "live lookup + controlled change-detection test"
+npm run fixture:build
 ```
 
 Offline tests never require the private workbook, Cursor-only paths, or network.  
-Optional `gospel.test.js` skips cleanly when the source xlsx is absent.
+Optional workbook tests skip cleanly when the source xlsx is absent.
+
+UI: Permits · Attention · Import · **Sources** (Connect a location + registry + ArcGIS inspect) · Connectors.
 
 ## Environment
 

@@ -251,6 +251,49 @@ export function migrate() {
       payload_json TEXT NOT NULL,
       imported_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS source_registry (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      key TEXT NOT NULL UNIQUE,
+      jurisdiction_code TEXT NOT NULL,
+      agency TEXT NOT NULL DEFAULT '',
+      record_types TEXT NOT NULL DEFAULT '',
+      official_url TEXT NOT NULL DEFAULT '',
+      endpoint TEXT NOT NULL DEFAULT '',
+      platform TEXT NOT NULL DEFAULT '',
+      adapter_type TEXT NOT NULL DEFAULT 'none',
+      available_fields_json TEXT NOT NULL DEFAULT '{}',
+      auth_access TEXT NOT NULL DEFAULT '',
+      refresh_frequency TEXT NOT NULL DEFAULT 'unknown',
+      state TEXT NOT NULL DEFAULT 'discovered',
+      coverage_limitations TEXT NOT NULL DEFAULT '',
+      evidence TEXT NOT NULL DEFAULT '',
+      last_verified_at TEXT,
+      reusable INTEGER NOT NULL DEFAULT 1,
+      activated INTEGER NOT NULL DEFAULT 0,
+      activated_at TEXT,
+      activated_by TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS discovery_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      jurisdiction_code TEXT,
+      url TEXT NOT NULL,
+      result_json TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'discovered',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS idless_match_candidates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      permit_record_id INTEGER REFERENCES permit_records(id) ON DELETE CASCADE,
+      strategy TEXT NOT NULL,
+      evidence_json TEXT NOT NULL,
+      confidence TEXT NOT NULL DEFAULT 'low',
+      status TEXT NOT NULL DEFAULT 'needs_review',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   // Additive migrations for existing DBs
@@ -265,6 +308,8 @@ export function migrate() {
   addColumn('permit_records', 'progress_anchor_at', 'progress_anchor_at TEXT');
   addColumn('permit_records', 'baseline_snapshot_at', 'baseline_snapshot_at TEXT');
   addColumn('permit_records', 'record_origin', "record_origin TEXT NOT NULL DEFAULT 'import'");
+  addColumn('permit_records', 'authority_note', "authority_note TEXT NOT NULL DEFAULT ''");
+  addColumn('community_sections', 'authority_note', "authority_note TEXT NOT NULL DEFAULT ''");
   addColumn('internal_milestones', 'source', "source TEXT NOT NULL DEFAULT 'import'");
   addColumn('internal_milestones', 'edited_in_app', 'edited_in_app INTEGER NOT NULL DEFAULT 0');
   addColumn('internal_milestones', 'last_import_value', 'last_import_value TEXT');

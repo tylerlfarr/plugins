@@ -99,7 +99,8 @@ export function detectPermitTrackerSections(rows) {
       headers,
       jurisdiction_code: jur.code,
       jurisdiction_source: jur.source,
-      jurisdiction_confirmed: jur.confirmed,
+      jurisdiction_confirmed: jur.confirmed ? 1 : 0,
+      authority_note: jur.authority_note || '',
     });
   }
   return sections;
@@ -173,30 +174,35 @@ export function parseWorkbookBuffer(buffer) {
           let jurisdiction_source = section.jurisdiction_source;
           let jurisdiction_confirmed = section.jurisdiction_confirmed;
 
-          // Confirmed mapping wins; suggestions never override confirmed
+          // Confirmed AHJ wins. Otherwise keep section geography suggestion;
+          // ID heuristics may refine only when non-ambiguous and section unresolved.
           if (!jurisdiction_confirmed) {
-            if (suggestion.code !== 'unresolved' && suggestion.confidence !== 'ambiguous') {
+            if (suggestion.confidence === 'ambiguous') {
+              // Keep section geography suggestion if present; flag for review
+              if (jurisdiction_code === 'unresolved') {
+                jurisdiction_source = 'ambiguous_id';
+              }
+              result.reviews.push({
+                reason: suggestion.reason || 'Ambiguous ID jurisdiction',
+                candidate_official_id: oid,
+                jurisdiction_code,
+                payload: {
+                  row: r + 1,
+                  lot,
+                  housetype,
+                  community: section.community_name,
+                  section_suggestion: section.jurisdiction_code,
+                  suggestion,
+                },
+              });
+            } else if (
+              jurisdiction_code === 'unresolved' &&
+              suggestion.code !== 'unresolved' &&
+              suggestion.confidence !== 'none'
+            ) {
               jurisdiction_code = suggestion.code;
               jurisdiction_source = 'inferred';
               jurisdiction_confirmed = 0;
-            } else {
-              jurisdiction_code = 'unresolved';
-              jurisdiction_source = suggestion.confidence === 'ambiguous' ? 'ambiguous_id' : 'unresolved';
-              jurisdiction_confirmed = 0;
-              if (suggestion.confidence === 'ambiguous') {
-                result.reviews.push({
-                  reason: suggestion.reason || 'Ambiguous ID jurisdiction',
-                  candidate_official_id: oid,
-                  jurisdiction_code: 'unresolved',
-                  payload: {
-                    row: r + 1,
-                    lot,
-                    housetype,
-                    community: section.community_name,
-                    suggestion,
-                  },
-                });
-              }
             }
           }
 
@@ -207,6 +213,7 @@ export function parseWorkbookBuffer(buffer) {
             jurisdiction_code,
             jurisdiction_source,
             jurisdiction_confirmed,
+            authority_note: section.authority_note || '',
             permit_time_note: section.permit_time_note,
             headers: section.headers,
             headerRow: section.headerRow,
@@ -348,12 +355,13 @@ function upsertSection(section) {
   if (existing) {
     db.prepare(
       `UPDATE community_sections SET jurisdiction_code = ?, jurisdiction_source = ?,
-       jurisdiction_confirmed = ?, permit_time_note = ?, header_json = ?, source_header_row = ?,
+       jurisdiction_confirmed = ?, authority_note = ?, permit_time_note = ?, header_json = ?, source_header_row = ?,
        record_origin = 'import' WHERE id = ?`
     ).run(
       section.jurisdiction_code,
       section.jurisdiction_source,
-      section.jurisdiction_confirmed,
+      section.jurisdiction_confirmed ? 1 : 0,
+      section.authority_note || '',
       section.permit_time_note || '',
       JSON.stringify(section.headers || []),
       section.headerRow || null,
@@ -365,15 +373,16 @@ function upsertSection(section) {
     .prepare(
       `INSERT INTO community_sections(
          project_code, community_name, jurisdiction_code, jurisdiction_source, jurisdiction_confirmed,
-         permit_time_note, header_json, source_header_row, record_origin
-       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'import')`
+         authority_note, permit_time_note, header_json, source_header_row, record_origin
+       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'import')`
     )
     .run(
       section.project_code,
       section.community_name,
       section.jurisdiction_code,
       section.jurisdiction_source,
-      section.jurisdiction_confirmed,
+      section.jurisdiction_confirmed ? 1 : 0,
+      section.authority_note || '',
       section.permit_time_note || '',
       JSON.stringify(section.headers || []),
       section.headerRow || null
@@ -578,15 +587,16 @@ export function commitWorkbookParse(parsed, { changedBy, replaceSecondary = true
           .prepare(
             `INSERT INTO permit_records(
                lot_group_id, primary_official_id, jurisdiction_code, jurisdiction_source,
-               jurisdiction_confirmed, internal_status, record_origin, progress_anchor_at
-             ) VALUES (?, ?, ?, ?, ?, 'watching', 'import', datetime('now'))`
+               jurisdiction_confirmed, authority_note, internal_status, record_origin, progress_anchor_at
+             ) VALUES (?, ?, ?, ?, ?, ?, 'watching', 'import', datetime('now'))`
           )
           .run(
             lotId,
             row.primary_official_id,
             row.jurisdiction_code,
             row.jurisdiction_source,
-            row.jurisdiction_confirmed
+            row.jurisdiction_confirmed ? 1 : 0,
+            row.authority_note || ''
           );
         const permitId = Number(info.lastInsertRowid);
         recordChange(permitId, 'created', '', 'workbook_import', user, 'import');

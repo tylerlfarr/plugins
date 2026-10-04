@@ -20,6 +20,15 @@ import {
 } from './workbookImport.js';
 import { exportCoexistenceXlsx } from './excelExport.js';
 import { seed } from './seed.js';
+import {
+  ensureSourceRegistrySeeded,
+  listSources,
+  getSource,
+  activateSource,
+  setSourceState,
+} from './sources/registry.js';
+import { inspectArcGisUrl, SEED_ARCGIS_CANDIDATES } from './sources/arcgisDiscover.js';
+import { connectLocation, discoveryProviderInterface } from './sources/connectLocation.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, '..');
@@ -31,6 +40,7 @@ const SOURCE_WORKBOOK =
   '/cursor/stores/self/internal/Permit_Tracker_9.1.2026.xlsx';
 
 migrate();
+ensureSourceRegistrySeeded();
 if (db.prepare('SELECT COUNT(*) AS c FROM community_sections').get().c === 0) {
   seed({ includeDemoProbe: process.env.PERMIT_DEMO === '1' });
 }
@@ -386,6 +396,85 @@ app.get('/api/connectors', (_req, res) => {
   res.json({
     connectors: listConnectors(),
     fairfaxFieldAvailability: FAIRFAX_FIELD_AVAILABILITY,
+  });
+});
+
+app.get('/api/sources', (req, res) => {
+  res.json({
+    sources: listSources({
+      jurisdiction_code: req.query.jurisdiction_code,
+      state: req.query.state,
+      verifiedOnly: req.query.verifiedOnly === 'true',
+    }),
+    discoveryProvider: discoveryProviderInterface,
+  });
+});
+
+app.get('/api/sources/:key', (req, res) => {
+  const src = getSource(req.params.key);
+  if (!src) return res.status(404).json({ error: 'Not found' });
+  res.json({ source: src });
+});
+
+app.post('/api/sources/:key/activate', (req, res) => {
+  try {
+    const src = activateSource(req.params.key, {
+      reviewedBy: req.body?.reviewedBy || currentUser(),
+    });
+    res.json({ source: src });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/sources/:key/state', (req, res) => {
+  try {
+    const src = setSourceState(req.params.key, req.body?.state, req.body?.evidence);
+    res.json({ source: src });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/discover/arcgis', async (req, res) => {
+  try {
+    const result = await inspectArcGisUrl(req.body?.url, {
+      sampleKnownIds: req.body?.knownIds || [],
+    });
+    res.json({ result, seedCandidates: SEED_ARCGIS_CANDIDATES });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/connect-location', async (req, res) => {
+  try {
+    const result = await connectLocation(req.body || {});
+    if (req.body?.activate && req.body?.sourceKey) {
+      const src = activateSource(req.body.sourceKey, {
+        reviewedBy: req.body.reviewedBy || currentUser(),
+      });
+      result.activated = src;
+      result.status = 'supported_connected';
+    }
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/idless-candidates', (_req, res) => {
+  res.json({
+    candidates: db
+      .prepare(
+        `SELECT c.*, p.primary_official_id, lg.lot_label, cs.community_name
+         FROM idless_match_candidates c
+         LEFT JOIN permit_records p ON p.id = c.permit_record_id
+         LEFT JOIN lot_groups lg ON lg.id = p.lot_group_id
+         LEFT JOIN community_sections cs ON cs.id = lg.section_id
+         ORDER BY c.id DESC LIMIT 100`
+      )
+      .all(),
   });
 });
 
