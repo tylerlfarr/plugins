@@ -195,22 +195,19 @@ export async function findContactsForProperty({
       db.prepare(`SELECT record_origin FROM lot_groups WHERE id = ?`).get(lotGroupId)?.record_origin ===
         'import');
 
-  // Fixture/sandbox never attach to operational records. Production may attach to confirmed links.
-  // Dedicated sandbox_demo properties may receive fixture/sandbox attaches for UI demos.
+  // Fixture/sandbox never attach to operational *properties*. Production may attach to confirmed links.
+  // Explicitly invented sandbox_demo properties may receive fixture/sandbox attaches for UI demos
+  // (contacts keep local_fixture/sandbox_demo origin and stay out of operational exports).
   let mayAttach = false;
   let isolation = null;
   if (!result.contacts?.length) {
     mayAttach = false;
   } else if (isDemoMode) {
-    if (property.record_origin === 'sandbox_demo' && !operationalImport) {
-      mayAttach = true;
-    } else if (property.record_origin === 'sandbox_demo' && !permit) {
+    if (property.record_origin === 'sandbox_demo') {
       mayAttach = true;
     } else if (operationalImport || permit?.record_origin === 'import') {
       mayAttach = false;
       isolation = `${cfg.mode}_results_not_attached_to_operational_workbook_record`;
-    } else if (property.record_origin === 'sandbox_demo') {
-      mayAttach = true;
     } else {
       mayAttach = false;
       isolation = `${cfg.mode}_results_not_attached_without_sandbox_demo_property`;

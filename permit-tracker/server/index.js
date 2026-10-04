@@ -235,6 +235,9 @@ app.get('/api/meta', requireAuth, (req, res) => {
     trialSequence:
       'Import workbook → fill missing property info → confirm property → retrieve supported official info → optionally find contacts → review → export → inspect Attention',
     businessName: getSetting('business_name', ''),
+    tracerfy: tracerfyConfig(),
+    tracerfySetupNote:
+      'Connect Tracerfy to enable live lookups: set TRACERFY_API_TOKEN, tracerfy_spend_limit_credits, tracerfy_commercial_confirmed=1, and tracerfy_production_enabled=1 in the host environment/secrets (see docs/deploy.md). Never paste tokens in chat.',
   });
 });
 
@@ -1003,9 +1006,64 @@ app.get('/api/properties/:id', (req, res) => {
   });
 });
 
+/** Invented sandbox_demo property for labeled contact demos — never production Tracerfy. */
+app.post('/api/properties/demo-sandbox', (req, res) => {
+  try {
+    const { permit_record_id, lot_group_id } = req.body || {};
+    if (!lot_group_id) {
+      return res.status(400).json({ error: 'lot_group_id required — never implicit attach' });
+    }
+    if (permit_record_id) {
+      const permit = db.prepare('SELECT * FROM permit_records WHERE id = ?').get(Number(permit_record_id));
+      if (!permit || Number(permit.lot_group_id) !== Number(lot_group_id)) {
+        return res.status(400).json({ error: 'lot_group_id does not match selected permit' });
+      }
+    }
+    const stamp = Date.now().toString(36);
+    const property = upsertProperty(
+      {
+        site_address: `100 Invented Demo Way Unit ${stamp}`,
+        city: 'Demo City',
+        state: 'VA',
+        zip: '20100',
+        parcel_apn: `DEMO-APN-${stamp}`,
+        parcel_jurisdiction: 'demo_sandbox',
+        source: 'sandbox',
+        match_state: 'manual',
+        record_origin: 'sandbox_demo',
+        notes: 'INVENTED sandbox_demo property — fabricated contacts only; not operational',
+      },
+      { actor: currentUser() }
+    );
+    linkPropertyToLot({
+      propertyId: property.id,
+      lotGroupId: Number(lot_group_id),
+      permitRecordId: permit_record_id ? Number(permit_record_id) : null,
+      linkState: 'confirmed',
+      evidence: { source: 'invented_sandbox_demo', warning: 'not a real address' },
+      confirmedBy: currentUser(),
+    });
+    res.json({
+      property: getProperty(property.id),
+      properties: permit_record_id
+        ? listPropertiesForPermit(permit_record_id)
+        : listPropertiesForLotSafe(lot_group_id),
+      note: 'Invented sandbox_demo property confirmed for labeled demo contact lookups only.',
+    });
+  } catch (e) {
+    res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
 app.post('/api/properties', (req, res) => {
   try {
     const body = req.body || {};
+    // Never allow clients to create sandbox_demo via the operational property path.
+    if (body.record_origin === 'sandbox_demo' || body.source === 'sandbox') {
+      return res.status(400).json({
+        error: 'Use POST /api/properties/demo-sandbox for invented demo properties',
+      });
+    }
     const { lot_group_id, permit_record_id, link_state } = body;
     if (!lot_group_id) {
       return res.status(400).json({ error: 'lot_group_id required — never implicit attach' });

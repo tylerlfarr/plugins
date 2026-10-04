@@ -324,6 +324,44 @@ export default function App() {
     }
   }
 
+  async function createInventedDemoProperty() {
+    if (!detail) return;
+    setBusy(true);
+    try {
+      const data = await api('/api/properties/demo-sandbox', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          lot_group_id: detail.lot_group_id,
+          permit_record_id: detail.id,
+        }),
+      });
+      setProperties(data.properties || []);
+      applyPropertyToForm(data.property);
+      setMessage(
+        data.note ||
+          'Invented sandbox_demo property ready — Find contact information will return labeled demo contacts only.'
+      );
+      if (tracerfy?.mode !== 'local_fixture' && tracerfy?.mode !== 'hosted_sandbox') {
+        try {
+          const modeData = await api('/api/contacts/provider-mode', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ mode: 'local_fixture' }),
+          });
+          setTracerfy(modeData.tracerfy);
+        } catch {
+          /* owner-only mode switch may fail for operators — local_fixture is usually already default */
+        }
+      }
+      await openDetail(detail.id);
+    } catch (e) {
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function previewCrosswalkFile(file) {
     setBusy(true);
     try {
@@ -486,7 +524,9 @@ export default function App() {
         const status = await api('/api/auth/status');
         setAuthGate({ enabled: status.enabled, user: status.user });
         if (!status.enabled || status.user) {
-          setMeta(await api('/api/meta'));
+          const m = await api('/api/meta');
+          setMeta(m);
+          if (m.tracerfy) setTracerfy(m.tracerfy);
         }
       } catch (e) {
         setMessage(String(e.message || e));
@@ -743,7 +783,9 @@ export default function App() {
                   body: JSON.stringify(loginForm),
                 });
                 setAuthGate({ enabled: true, user: data.user });
-                setMeta(await api('/api/meta'));
+                const m = await api('/api/meta');
+                setMeta(m);
+                if (m.tracerfy) setTracerfy(m.tracerfy);
                 setMessage('');
               } catch (e) {
                 setMessage(String(e.message || e));
@@ -1378,6 +1420,9 @@ export default function App() {
                             <div className="muted">
                               #{p.id} · {p.link_state} · {p.match_state} · {p.source}
                               {p.parcel_apn ? ` · APN ${p.parcel_apn}` : ''}
+                              {p.record_origin === 'sandbox_demo'
+                                ? ' · INVENTED sandbox_demo'
+                                : ''}
                             </div>
                           </span>
                         </label>
@@ -1395,11 +1440,75 @@ export default function App() {
                     ))}
                   </ul>
 
-                  <h3>Contacts</h3>
+                  <h3>Find contact information</h3>
                   <p className="muted">
                     Roles are separate (owner ≠ applicant ≠ contractor). Provider return ≠ confirmed.
+                    Production Tracerfy stays off until owner configures secrets outside chat.
                     {tracerfy ? ` Mode: ${tracerfy.mode}.` : ''}
                   </p>
+                  {selectedProperty() ? (
+                    <div className="attention-item">
+                      <strong>Address / parcel to search</strong>
+                      <div className="mono">
+                        {selectedProperty().site_address || '(no street)'}
+                        {selectedProperty().parcel_apn
+                          ? ` · APN ${selectedProperty().parcel_apn}`
+                          : ''}
+                      </div>
+                      <div className="muted">
+                        {[selectedProperty().city, selectedProperty().state, selectedProperty().zip]
+                          .filter(Boolean)
+                          .join(', ')}
+                        {selectedProperty().record_origin === 'sandbox_demo'
+                          ? ' · INVENTED sandbox_demo property (demo contacts only)'
+                          : ' · operational property'}
+                      </div>
+                    </div>
+                  ) : (
+                    <p className="muted">Select a confirmed property to show the search address.</p>
+                  )}
+                  {!tracerfy?.tokenPresent || !tracerfy?.productionGatesOk ? (
+                    <div className="banner warn">
+                      Connect Tracerfy to enable live lookups. Until then, use an invented demo
+                      property for labeled sandbox/fixture contacts, or enter manual contacts.
+                      {meta.tracerfySetupNote ? (
+                        <div className="muted" style={{ marginTop: '0.35rem' }}>
+                          {meta.tracerfySetupNote}
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                  {(meta.authUser?.role === 'owner' || !meta.authEnabled) && (
+                    <details className="attention-item">
+                      <summary>
+                        <strong>Owner setup — Tracerfy (env / secrets only)</strong>
+                      </summary>
+                      <p className="muted">
+                        Do not paste tokens here or in chat. On the host, set environment / Fly secrets
+                        per <span className="mono">docs/deploy.md</span>:
+                      </p>
+                      <ul className="history">
+                        <li>
+                          <span className="mono">TRACERFY_API_TOKEN</span> — provider token
+                        </li>
+                        <li>
+                          <span className="mono">tracerfy_spend_limit_credits</span> — spend cap setting
+                        </li>
+                        <li>
+                          <span className="mono">tracerfy_commercial_confirmed=1</span> — ToS confirm
+                        </li>
+                        <li>
+                          <span className="mono">tracerfy_production_enabled=1</span> — unlock production
+                          mode after gates pass
+                        </li>
+                      </ul>
+                      <p className="muted">
+                        This preview keeps production disabled. Demo contacts use invented{' '}
+                        <span className="mono">sandbox_demo</span> properties only and never enter
+                        operational exports.
+                      </p>
+                    </details>
+                  )}
                   <div className="toolbar">
                     {['local_fixture', 'hosted_sandbox', 'production'].map((m) => (
                       <button
@@ -1408,14 +1517,33 @@ export default function App() {
                         className={`btn ${tracerfy?.mode === m || tracerfy?.requestedMode === m ? 'primary' : ''}`}
                         disabled={busy || (m === 'production' && !tracerfy?.productionGatesOk)}
                         onClick={() => setProviderMode(m)}
+                        title={
+                          m === 'production' && !tracerfy?.productionGatesOk
+                            ? 'Connect Tracerfy to enable live lookups'
+                            : m
+                        }
                       >
                         {m}
                       </button>
                     ))}
                   </div>
                   <div className="toolbar">
-                    <button type="button" className="btn primary" disabled={busy} onClick={findContacts}>
-                      Find contacts
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={busy}
+                      onClick={createInventedDemoProperty}
+                      title="Creates an invented sandbox_demo address for labeled demo contacts"
+                    >
+                      Create invented demo property
+                    </button>
+                    <button
+                      type="button"
+                      className="btn primary"
+                      disabled={busy}
+                      onClick={findContacts}
+                    >
+                      Find contact information
                     </button>
                   </div>
                   <h4>Add manual contact</h4>
@@ -1477,7 +1605,10 @@ export default function App() {
                           {c.provider || 'manual'} · {c.provider_source} · {c.validation_state} · retrieved{' '}
                           {c.retrieved_at || '—'}
                           {c.record_origin === 'sandbox_demo' || c.record_origin === 'local_fixture'
-                            ? ` · ${c.record_origin.toUpperCase()}`
+                            ? ` · DEMO ${c.record_origin.toUpperCase()} — not operational`
+                            : ''}
+                          {c.notes && String(c.notes).includes('DEMO')
+                            ? ` · ${c.notes}`
                             : ''}
                           {c.restriction_flags_json && c.restriction_flags_json !== '[]'
                             ? ` · flags ${c.restriction_flags_json}`
