@@ -193,8 +193,9 @@ test('provider failure modes: no match, credits, rate limit, timeout reconcile, 
   });
   assert.equal(timed.job.status, 'timed_out');
   const rec = reconcileTimedOutJob(timed.job.id, { resolution: 'manual_abandon' });
-  assert.equal(rec.action, 'manually_resolved_abandoned');
+  assert.equal(rec.action, 'abandoned_blocked');
   assert.equal(rec.safeToResubmit, false);
+  assert.equal(rec.job.status, 'abandoned_blocked');
 
   const dedupeProp = sandAddr(6);
   const first = await findContactsForProperty({

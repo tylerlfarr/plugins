@@ -327,9 +327,22 @@ test('timeout remains unresolved; reconcile is manual not auto-safe; concurrent 
 
   const abandoned = reconcileTimedOutJob(timed.job.id, { resolution: 'manual_abandon' });
   assert.equal(abandoned.safeToResubmit, false);
-  assert.match(abandoned.job.error || '', /NOT automatic-safe-to-resubmit/i);
+  assert.equal(abandoned.job.status, 'abandoned_blocked');
 
-  // After abandon, new lookup allowed
+  // Abandon keeps automatic resubmit blocked
+  const stillBlocked = await findContactsForProperty({
+    propertyId: prop.id,
+    requireConfirmedLink: false,
+  });
+  assert.equal(stillBlocked.blocked, true);
+  assert.equal(stillBlocked.error?.error, 'abandoned_blocked');
+
+  // Explicit retry authorization with evidence allows resubmit
+  const allowed = reconcileTimedOutJob(timed.job.id, {
+    resolution: 'manual_allow_resubmit',
+    note: 'provider dashboard shows no charge for request',
+  });
+  assert.equal(allowed.safeToResubmit, true);
   const after = await findContactsForProperty({
     propertyId: prop.id,
     forceFail: 'no_match',

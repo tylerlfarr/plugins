@@ -149,6 +149,7 @@ export function exportCoexistenceXlsx({
        WHERE c.record_origin NOT IN ('sandbox_demo','local_fixture')
          AND c.status IN (${statusPlaceholders})
          AND c.status NOT IN ('rejected','outdated')
+         AND (c.provider_source IS NULL OR c.provider_source NOT IN ('hosted_sandbox','local_fixture','sandbox_fabricated'))
        ORDER BY c.id`
     )
     .all(...statuses);

@@ -259,6 +259,9 @@ function productionToken() {
   return process.env.TRACERFY_API_TOKEN || '';
 }
 
+/** Charge kinds that count against the production spend cap. */
+const CAP_CHARGE_KINDS = ['reserved', 'reserved_uncertain', 'actual'];
+
 function usageSum(mode, chargeKinds = null) {
   let sql = `SELECT COALESCE(SUM(credits),0) AS c FROM provider_usage WHERE provider='tracerfy' AND mode=?`;
   const params = [mode];
@@ -267,6 +270,10 @@ function usageSum(mode, chargeKinds = null) {
     params.push(...chargeKinds);
   }
   return db.prepare(sql).get(...params).c;
+}
+
+export function productionCapUsage() {
+  return usageSum(PROVIDER_MODES.PRODUCTION, CAP_CHARGE_KINDS);
 }
 
 function reserveCredits({ mode, endpoint, estimated, jobId }) {
@@ -279,7 +286,7 @@ function reserveCredits({ mode, endpoint, estimated, jobId }) {
     return { reserved: estimated, chargeKind: 'reserved_simulated' };
   }
   const spendLimit = Number(getSetting('tracerfy_spend_limit_credits', '0') || 0);
-  const reserved = usageSum(PROVIDER_MODES.PRODUCTION, ['reserved', 'actual']);
+  const reserved = productionCapUsage();
   if (reserved + estimated > spendLimit) {
     return { blocked: true, reason: 'spend_limit', reserved, spendLimit };
   }
@@ -290,18 +297,66 @@ function reserveCredits({ mode, endpoint, estimated, jobId }) {
   return { reserved: estimated, chargeKind: 'reserved' };
 }
 
+/**
+ * Settle credits for a finished job.
+ * Uncertain outcomes KEEP a conservative reservation (reserved_uncertain) that still
+ * counts against the production cap until explicit reconciliation with evidence.
+ * Never DELETE reservation history — convert / append audit rows only.
+ */
 function settleCredits({ jobId, mode, endpoint, actualCredits, unknown = false }) {
-  // Release prior reservation rows for this job
-  db.prepare(
-    `DELETE FROM provider_usage WHERE job_id = ? AND charge_kind IN ('reserved','reserved_simulated')`
-  ).run(jobId);
   if (unknown) {
+    const open = db
+      .prepare(
+        `SELECT id, credits, charge_kind FROM provider_usage
+         WHERE job_id = ? AND charge_kind IN ('reserved','reserved_simulated')`
+      )
+      .all(jobId);
+    if (open.length) {
+      for (const row of open) {
+        const nextKind =
+          row.charge_kind === 'reserved' ? 'reserved_uncertain' : 'reserved_uncertain_simulated';
+        db.prepare(`UPDATE provider_usage SET charge_kind = ? WHERE id = ?`).run(nextKind, row.id);
+      }
+    } else {
+      // No prior reservation row — still hold estimated against the cap when production
+      const job = db.prepare('SELECT estimated_credits FROM contact_jobs WHERE id = ?').get(jobId);
+      const hold = Number(job?.estimated_credits || 0);
+      db.prepare(
+        `INSERT INTO provider_usage(provider, mode, endpoint, credits, job_id, charge_kind)
+         VALUES ('tracerfy', ?, ?, ?, ?, ?)`
+      ).run(
+        mode,
+        endpoint,
+        hold,
+        jobId,
+        mode === PROVIDER_MODES.PRODUCTION ? 'reserved_uncertain' : 'reserved_uncertain_simulated'
+      );
+    }
+    // Append non-counting audit marker (history, not erase)
     db.prepare(
       `INSERT INTO provider_usage(provider, mode, endpoint, credits, job_id, charge_kind)
-       VALUES ('tracerfy', ?, ?, 0, ?, 'unknown')`
+       VALUES ('tracerfy', ?, ?, 0, ?, 'unknown_outcome_audit')`
     ).run(mode, endpoint, jobId);
     return;
   }
+
+  // Certain outcome: convert open reservations to settled (append release audit, zero out hold)
+  const open = db
+    .prepare(
+      `SELECT id, credits, charge_kind FROM provider_usage
+       WHERE job_id = ? AND charge_kind IN ('reserved','reserved_simulated','reserved_uncertain','reserved_uncertain_simulated')`
+    )
+    .all(jobId);
+  for (const row of open) {
+    // Append history: mark prior hold as settled_from_* without deleting the row's audit trail —
+    // convert charge_kind so it no longer counts toward cap, keep credits for forensics.
+    const settledKind =
+      row.charge_kind.startsWith('reserved_uncertain')
+        ? 'settled_from_uncertain'
+        : 'settled_from_reserved';
+    db.prepare(`UPDATE provider_usage SET charge_kind = ? WHERE id = ?`).run(settledKind, row.id);
+  }
+
   const kind =
     mode === PROVIDER_MODES.PRODUCTION
       ? 'actual'
@@ -314,6 +369,13 @@ function settleCredits({ jobId, mode, endpoint, actualCredits, unknown = false }
   ).run(mode, endpoint, actualCredits, jobId, kind);
 }
 
+function appendReconcileAudit(jobId, mode, endpoint, chargeKind, note) {
+  db.prepare(
+    `INSERT INTO provider_usage(provider, mode, endpoint, credits, job_id, charge_kind)
+     VALUES ('tracerfy', ?, ?, 0, ?, ?)`
+  ).run(mode, endpoint || '', jobId, `${chargeKind}:${String(note || '').slice(0, 120)}`);
+}
+
 function failJob(jobId, error, responseJson = null, status = 'failed') {
   db.prepare(
     `UPDATE contact_jobs SET status=?, error=?, response_json=?, finished_at=datetime('now'), updated_at=datetime('now') WHERE id=?`
@@ -321,16 +383,62 @@ function failJob(jobId, error, responseJson = null, status = 'failed') {
   return db.prepare('SELECT * FROM contact_jobs WHERE id = ?').get(jobId);
 }
 
+/**
+ * Cache reuse scoped to job mode + current property identity.
+ * Excludes rejected/outdated; production jobs never reuse sandbox/fixture contacts.
+ */
 function loadCachedContactsForJob(job) {
   if (!job?.property_id) return [];
+  const origins =
+    job.mode === PROVIDER_MODES.PRODUCTION
+      ? ['provider']
+      : job.mode === PROVIDER_MODES.HOSTED_SANDBOX
+        ? ['sandbox_demo']
+        : ['local_fixture', 'sandbox_demo'];
   return db
     .prepare(
       `SELECT * FROM contacts
-       WHERE property_id = ? AND provider = 'tracerfy'
-         AND status != 'rejected'
+       WHERE property_id = ?
+         AND provider = 'tracerfy'
+         AND status NOT IN ('rejected','outdated')
+         AND record_origin IN (${origins.map(() => '?').join(',')})
        ORDER BY id`
     )
-    .all(job.property_id);
+    .all(job.property_id, ...origins);
+}
+
+/**
+ * True when a hosted-sandbox request would involve operational/imported data.
+ * Only explicitly invented sandbox_demo properties (not tied to import lots/permits) are allowed.
+ */
+export function propertyInvolvesOperationalData(
+  property,
+  { permitRecordId = null, lotGroupId = null } = {}
+) {
+  if (!property) return true;
+
+  if (permitRecordId) {
+    const p = db.prepare(`SELECT record_origin FROM permit_records WHERE id = ?`).get(Number(permitRecordId));
+    if (p?.record_origin === 'import') return true;
+  }
+  if (lotGroupId) {
+    const lg = db.prepare(`SELECT record_origin FROM lot_groups WHERE id = ?`).get(Number(lotGroupId));
+    if (lg?.record_origin === 'import') return true;
+  }
+
+  const importLink = db
+    .prepare(
+      `SELECT 1 AS ok
+       FROM property_links pl
+       JOIN lot_groups lg ON lg.id = pl.lot_group_id
+       WHERE pl.property_id = ? AND lg.record_origin = 'import'
+       LIMIT 1`
+    )
+    .get(property.id);
+  if (importLink) return true;
+
+  // Hosted sandbox verification requires explicitly invented sandbox_demo properties
+  return property.record_origin !== 'sandbox_demo';
 }
 
 /**
@@ -353,6 +461,15 @@ export async function runContactLookup({
     throw new Error(
       'Tracerfy production Not configured — need TRACERFY_API_TOKEN env, spend limit, commercial confirmation, and production_enabled=1. Use local_fixture or hosted_sandbox meanwhile.'
     );
+  }
+
+  // Hosted sandbox: reject operational/imported data BEFORE any network request
+  if (cfg.mode === PROVIDER_MODES.HOSTED_SANDBOX) {
+    if (propertyInvolvesOperationalData(property, { permitRecordId, lotGroupId })) {
+      throw new Error(
+        'hosted_sandbox rejected: operational/imported property data not allowed. Use an invented sandbox_demo property only.'
+      );
+    }
   }
 
   const input =
@@ -388,11 +505,12 @@ export async function runContactLookup({
     input,
   });
 
-  // Block resubmit while a timed_out / unresolved job exists for this fingerprint
+  // Block resubmit while timed_out / unresolved / abandoned_blocked jobs exist for this fingerprint
   const unresolved = db
     .prepare(
       `SELECT * FROM contact_jobs
-       WHERE request_fingerprint = ? AND status IN ('timed_out','unresolved_timeout')
+       WHERE request_fingerprint = ?
+         AND status IN ('timed_out','unresolved_timeout','abandoned_blocked')
        ORDER BY id DESC LIMIT 1`
     )
     .get(fingerprint);
@@ -403,9 +521,12 @@ export async function runContactLookup({
       reconcileBeforeResubmit: true,
       error: {
         status: 409,
-        error: 'unresolved_timeout',
+        error:
+          unresolved.status === 'abandoned_blocked' ? 'abandoned_blocked' : 'unresolved_timeout',
         detail:
-          'Prior lookup timed out with uncertain provider outcome. Resolve manually before resubmit — not safe to resubmit automatically.',
+          unresolved.status === 'abandoned_blocked'
+            ? 'Prior lookup was abandoned — automatic resubmission remains blocked. Use explicit retry authorization (manual_allow_resubmit) with evidence.'
+            : 'Prior lookup timed out with uncertain provider outcome. Resolve manually before resubmit — not safe to resubmit automatically.',
       },
     };
   }
@@ -680,49 +801,77 @@ export async function runContactLookup({
 }
 
 /**
- * Manual resolution for timed-out jobs.
- * Does NOT mark "safe to resubmit" — documents that operator must decide.
- * Provider has no public get-by-request-id for Instant Trace; reconciliation is manual.
+ * Manual resolution for timed-out / abandoned jobs.
+ * - manual_abandon: keeps automatic resubmission blocked; does NOT release uncertain charge hold.
+ * - manual_allow_resubmit: separate auditable action with evidence; releases uncertain hold only then.
+ * Never erases provider_usage history (append/convert only).
  */
 export function reconcileTimedOutJob(jobId, { resolution = 'manual_abandon', note = '' } = {}) {
   const job = db.prepare('SELECT * FROM contact_jobs WHERE id = ?').get(Number(jobId));
   if (!job) throw new Error('Job not found');
-  if (!['timed_out', 'unresolved_timeout'].includes(job.status)) {
-    return { job, action: 'noop', note: 'Job is not in a timed-out state' };
+  if (!['timed_out', 'unresolved_timeout', 'abandoned_blocked'].includes(job.status)) {
+    return { job, action: 'noop', note: 'Job is not in a timed-out/abandoned state' };
   }
+
   if (resolution === 'manual_abandon') {
+    if (job.status === 'abandoned_blocked') {
+      return {
+        job,
+        action: 'noop',
+        safeToResubmit: false,
+        note: 'Already abandoned — automatic resubmit remains blocked; uncertain charge hold retained.',
+      };
+    }
     db.prepare(
-      `UPDATE contact_jobs SET status='manually_resolved', updated_at=datetime('now'),
+      `UPDATE contact_jobs SET status='abandoned_blocked', updated_at=datetime('now'),
        error = TRIM(COALESCE(error,'') || ?) WHERE id = ?`
     ).run(
-      ` | manually_resolved:abandoned — NOT automatic-safe-to-resubmit. ${note}`.trim(),
+      ` | abandoned_blocked — automatic resubmit blocked; uncertain charge hold retained. ${note}`.trim(),
       job.id
     );
-    // Clear unknown usage reservation marker
-    db.prepare(`DELETE FROM provider_usage WHERE job_id = ? AND charge_kind = 'unknown'`).run(job.id);
+    // Append audit only — do NOT release reserved_uncertain (still counts against cap)
+    appendReconcileAudit(job.id, job.mode, job.endpoint, 'reconcile_abandon', note);
     return {
       job: db.prepare('SELECT * FROM contact_jobs WHERE id = ?').get(job.id),
-      action: 'manually_resolved_abandoned',
+      action: 'abandoned_blocked',
       safeToResubmit: false,
-      note: 'Abandoned. A new lookup creates a new fingerprint attempt only after abandon. Operator must confirm no charge occurred.',
+      note: 'Abandoned. Automatic resubmission remains blocked. Uncertain credit reservation still counts against the spend cap until explicit retry authorization with evidence.',
     };
   }
+
   if (resolution === 'manual_allow_resubmit') {
+    if (!note || !String(note).trim()) {
+      throw new Error(
+        'manual_allow_resubmit requires evidence note — will not silently release an uncertain charge'
+      );
+    }
     db.prepare(
-      `UPDATE contact_jobs SET status='manually_resolved', updated_at=datetime('now'),
+      `UPDATE contact_jobs SET status='manually_resolved_allow_resubmit', updated_at=datetime('now'),
        error = TRIM(COALESCE(error,'') || ?) WHERE id = ?`
     ).run(
-      ` | manually_resolved:allow_resubmit after operator evidence. ${note}`.trim(),
+      ` | allow_resubmit after operator evidence: ${note}`.trim(),
       job.id
     );
-    // Change fingerprint blocker by marking resolved; new job can proceed
-    db.prepare(`DELETE FROM provider_usage WHERE job_id = ? AND charge_kind = 'unknown'`).run(job.id);
+    // Convert uncertain holds so they no longer count toward cap — keep rows for history
+    const holds = db
+      .prepare(
+        `SELECT id, charge_kind FROM provider_usage
+         WHERE job_id = ? AND charge_kind IN ('reserved_uncertain','reserved_uncertain_simulated')`
+      )
+      .all(job.id);
+    for (const row of holds) {
+      db.prepare(`UPDATE provider_usage SET charge_kind = 'released_with_evidence' WHERE id = ?`).run(
+        row.id
+      );
+    }
+    appendReconcileAudit(job.id, job.mode, job.endpoint, 'reconcile_allow_resubmit', note);
     return {
       job: db.prepare('SELECT * FROM contact_jobs WHERE id = ?').get(job.id),
       action: 'manually_resolved_allow_resubmit',
       safeToResubmit: true,
-      note: 'Operator asserted evidence that prior attempt did not succeed. Resubmit allowed.',
+      note: 'Operator provided evidence. Uncertain hold released with audit. Resubmit allowed.',
     };
   }
+
   throw new Error(`Unknown resolution ${resolution}`);
 }

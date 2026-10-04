@@ -140,6 +140,9 @@ export async function findContactsForProperty({
     ? db.prepare('SELECT * FROM permit_records WHERE id = ?').get(Number(permitRecordId))
     : null;
 
+  // Permit attachment requires explicit, validated, confirmed association.
+  // Do NOT implicitly select latest lot link when permitRecordId is absent.
+  let lotGroupId = null;
   if (permitRecordId) {
     const belonging = propertyBelongsToPermit(propertyId, permitRecordId);
     if (!belonging.ok) {
@@ -150,14 +153,8 @@ export async function findContactsForProperty({
         `Property link must be confirmed before Find contacts (current: ${belonging.link_state})`
       );
     }
+    lotGroupId = permit?.lot_group_id || belonging.link?.lot_group_id || null;
   }
-
-  const lotGroupId =
-    permit?.lot_group_id ||
-    db
-      .prepare(`SELECT lot_group_id FROM property_links WHERE property_id = ? ORDER BY id DESC LIMIT 1`)
-      .get(propertyId)?.lot_group_id ||
-    null;
 
   const result = await runContactLookup({
     property,

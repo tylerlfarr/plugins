@@ -12,7 +12,7 @@
     "start": "NODE_ENV=production node server/index.js",
     "seed": "node server/seed.js",
     "seed:demo": "PERMIT_DEMO=1 node server/seed.js --demo",
-    "test": "node --test --test-concurrency=1 ./server/tests/integrity.test.js && node --test --test-concurrency=1 ./server/tests/discovery.test.js && node --test --test-concurrency=1 ./server/tests/gospel.test.js && node --test --test-concurrency=1 ./server/tests/readiness.test.js && node --test --test-concurrency=1 ./server/tests/property-contacts.test.js && node --test --test-concurrency=1 ./server/tests/contact-workflow.test.js",
+    "test": "node --test --test-concurrency=1 ./server/tests/integrity.test.js && node --test --test-concurrency=1 ./server/tests/discovery.test.js && node --test --test-concurrency=1 ./server/tests/gospel.test.js && node --test --test-concurrency=1 ./server/tests/readiness.test.js && node --test --test-concurrency=1 ./server/tests/property-contacts.test.js && node --test --test-concurrency=1 ./server/tests/contact-workflow.test.js && node --test --test-concurrency=1 ./server/tests/evaluation-prep.test.js",
     "test:hosted-sandbox": "node server/scripts/hosted-sandbox-check.js",
     "test:live": "node server/scripts/demo-fairfax-attention.js && node server/scripts/coverage-report.js",
     "coverage:report": "node server/scripts/coverage-report.js",
