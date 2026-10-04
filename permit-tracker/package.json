@@ -1,0 +1,31 @@
+{
+  "name": "permit-tracker",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Local prototype: builder permit tracking with Excel import and jurisdiction connectors",
+  "type": "module",
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:server\" \"npm:dev:client\"",
+    "dev:server": "node --watch server/index.js",
+    "dev:client": "vite --config client/vite.config.js",
+    "build": "vite build --config client/vite.config.js",
+    "start": "NODE_ENV=production node server/index.js",
+    "seed": "node server/seed.js",
+    "test": "node --test --test-concurrency=1 server/tests/*.test.js",
+    "demo:import": "node server/scripts/demo-import.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.9.1",
+    "cors": "^2.8.5",
+    "express": "^4.21.2",
+    "multer": "^1.4.5-lts.2",
+    "xlsx": "^0.18.5"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.4",
+    "concurrently": "^9.1.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "vite": "^6.2.3"
+  }
+}
