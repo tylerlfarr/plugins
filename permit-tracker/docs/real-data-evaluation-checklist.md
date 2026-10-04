@@ -96,7 +96,22 @@ Rules:
 
 ---
 
-## F. Time saved (operator judgment)
+## F. Builder core work (measure these — not just contact hits)
+
+| Task | Old way (approx min / steps) | With Permit Ledger | Manual steps remaining | Notes |
+|------|------------------------------|--------------------|------------------------|-------|
+| Morning meeting prep (changed permits) | | | | Use Attention + last successful check |
+| Find changed / newly issued permits | | | | Fairfax issued-heavy only |
+| Identify blocked lots | | | | Lot readiness Ready/Blocked/Needs verification |
+| Preserve internal milestones across import | | | | Conflicts tab |
+| Assemble contacts for outreach | | | | Confirmed export only |
+| Filter residential vs commercial (when labeled) | | | | Many types → Unknown; see use-classification note |
+
+Trial sequence: **Import → missing property → confirm → retrieve supported official info → optional contacts → review → export → Attention.**
+
+---
+
+## G. Time saved (operator judgment)
 
 | Task | Old way (approx min) | With Permit Ledger (approx min) | Notes |
 |------|----------------------|----------------------------------|-------|
@@ -105,7 +120,7 @@ Rules:
 
 ---
 
-## G. Go / no-go for private trial expansion
+## H. Go / no-go for private trial expansion
 
 | Gate | Met? |
 |------|------|
@@ -115,5 +130,9 @@ Rules:
 | Export clean for outreach | ☐ |
 | No unexpected provider charges | ☐ |
 | PWC/Loudoun not claimed as live | ☐ |
+| Invite-only access verified (if `PILOT_AUTH=1`) | ☐ |
+| DB persists across restart on deploy volume | ☐ |
 
-**Shortest next step after gates:** operator supplies the 5–10 records + crosswalk addresses, sets env token + cap + commercial confirm, runs production mode on **confirmed** properties only with Instant Trace, reviews/accepts, exports confirmed package.
+**Use classification:** Prefer official labels; unreliable → Unknown; manual override survives sync. Does **not** expand jurisdiction coverage.
+
+**Shortest next step after gates:** operator supplies the 5–10 records + crosswalk addresses, hosting secrets (owner email/password), optional Tracerfy token + cap + commercial confirm, runs production mode on **confirmed** properties only with Instant Trace, reviews/accepts, exports confirmed package.
