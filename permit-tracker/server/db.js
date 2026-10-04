@@ -308,6 +308,156 @@ export function migrate() {
       ruleset_key TEXT NOT NULL DEFAULT 'default_workbook_v1',
       assessed_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS properties (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      site_address TEXT NOT NULL DEFAULT '',
+      city TEXT NOT NULL DEFAULT '',
+      state TEXT NOT NULL DEFAULT '',
+      zip TEXT NOT NULL DEFAULT '',
+      parcel_apn TEXT NOT NULL DEFAULT '',
+      parcel_jurisdiction TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT 'manual',
+      match_state TEXT NOT NULL DEFAULT 'unmatched',
+      record_origin TEXT NOT NULL DEFAULT 'manual',
+      notes TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS property_links (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+      lot_group_id INTEGER REFERENCES lot_groups(id) ON DELETE CASCADE,
+      permit_record_id INTEGER REFERENCES permit_records(id) ON DELETE SET NULL,
+      link_state TEXT NOT NULL DEFAULT 'candidate',
+      evidence_json TEXT NOT NULL DEFAULT '{}',
+      confirmed_by TEXT,
+      confirmed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(property_id, lot_group_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS property_confirmations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+      action TEXT NOT NULL,
+      actor TEXT NOT NULL DEFAULT '',
+      detail TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS property_crosswalk_rows (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_code TEXT,
+      community_name TEXT,
+      lot_label TEXT,
+      housetype TEXT,
+      site_address TEXT,
+      city TEXT,
+      state TEXT,
+      zip TEXT,
+      parcel_apn TEXT,
+      parcel_jurisdiction TEXT,
+      match_status TEXT NOT NULL DEFAULT 'unmatched',
+      lot_group_id INTEGER REFERENCES lot_groups(id) ON DELETE SET NULL,
+      property_id INTEGER REFERENCES properties(id) ON DELETE SET NULL,
+      source_row INTEGER,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS contacts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      property_id INTEGER REFERENCES properties(id) ON DELETE CASCADE,
+      permit_record_id INTEGER REFERENCES permit_records(id) ON DELETE SET NULL,
+      lot_group_id INTEGER REFERENCES lot_groups(id) ON DELETE SET NULL,
+      role TEXT NOT NULL DEFAULT 'property_owner',
+      full_name TEXT NOT NULL DEFAULT '',
+      company TEXT NOT NULL DEFAULT '',
+      phone TEXT NOT NULL DEFAULT '',
+      email TEXT NOT NULL DEFAULT '',
+      mailing_address TEXT NOT NULL DEFAULT '',
+      provider TEXT NOT NULL DEFAULT '',
+      provider_source TEXT NOT NULL DEFAULT '',
+      retrieved_at TEXT,
+      validation_state TEXT NOT NULL DEFAULT 'provider_returned',
+      status TEXT NOT NULL DEFAULT 'candidate',
+      restriction_flags_json TEXT NOT NULL DEFAULT '[]',
+      record_origin TEXT NOT NULL DEFAULT 'manual',
+      notes TEXT NOT NULL DEFAULT '',
+      rejected_reason TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS contact_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      provider TEXT NOT NULL DEFAULT 'tracerfy',
+      mode TEXT NOT NULL DEFAULT 'sandbox',
+      property_id INTEGER REFERENCES properties(id) ON DELETE SET NULL,
+      permit_record_id INTEGER REFERENCES permit_records(id) ON DELETE SET NULL,
+      lot_group_id INTEGER REFERENCES lot_groups(id) ON DELETE SET NULL,
+      request_fingerprint TEXT NOT NULL,
+      endpoint TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'queued',
+      estimated_credits INTEGER NOT NULL DEFAULT 0,
+      actual_credits INTEGER NOT NULL DEFAULT 0,
+      request_json TEXT NOT NULL DEFAULT '{}',
+      response_json TEXT NOT NULL DEFAULT '{}',
+      error TEXT NOT NULL DEFAULT '',
+      external_request_id TEXT,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      finished_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS milestone_waivers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      permit_record_id INTEGER NOT NULL REFERENCES permit_records(id) ON DELETE CASCADE,
+      milestone_key TEXT NOT NULL,
+      reason TEXT NOT NULL DEFAULT '',
+      waived_by TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(permit_record_id, milestone_key)
+    );
+
+    CREATE TABLE IF NOT EXISTS applicability_config (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      community_section_id INTEGER REFERENCES community_sections(id) ON DELETE CASCADE,
+      lot_group_id INTEGER REFERENCES lot_groups(id) ON DELETE CASCADE,
+      feature_key TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'needs_confirmation',
+      notes TEXT NOT NULL DEFAULT '',
+      updated_by TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS plan_links (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      lot_group_id INTEGER NOT NULL REFERENCES lot_groups(id) ON DELETE CASCADE,
+      plan_tracker_row_id INTEGER REFERENCES plan_tracker_rows(id) ON DELETE SET NULL,
+      product_name TEXT,
+      counties TEXT,
+      housetype TEXT,
+      link_state TEXT NOT NULL DEFAULT 'candidate',
+      evidence_json TEXT NOT NULL DEFAULT '{}',
+      confirmed_by TEXT,
+      confirmed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(lot_group_id, product_name, counties, housetype)
+    );
+
+    CREATE TABLE IF NOT EXISTS provider_usage (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      provider TEXT NOT NULL,
+      mode TEXT NOT NULL,
+      endpoint TEXT NOT NULL,
+      credits INTEGER NOT NULL DEFAULT 0,
+      job_id INTEGER REFERENCES contact_jobs(id) ON DELETE SET NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
   `);
 
   // Additive migrations for existing DBs

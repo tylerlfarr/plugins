@@ -124,11 +124,42 @@ export function exportCoexistenceXlsx() {
   const masterfile = db.prepare('SELECT * FROM plan_tracker_rows ORDER BY id').all();
   const mst = db.prepare('SELECT * FROM mst_reference_ids ORDER BY id').all();
 
+  // Contacts export — never include sandbox_demo origins in operational package
+  const contacts = db
+    .prepare(
+      `SELECT c.role, c.full_name, c.company, c.phone, c.email, c.mailing_address,
+              c.provider, c.provider_source, c.retrieved_at, c.validation_state, c.status,
+              c.restriction_flags_json, c.record_origin,
+              pr.site_address, pr.city, pr.state, pr.zip, pr.parcel_apn,
+              cs.project_code, cs.community_name, lg.lot_label
+       FROM contacts c
+       LEFT JOIN properties pr ON pr.id = c.property_id
+       LEFT JOIN lot_groups lg ON lg.id = c.lot_group_id
+       LEFT JOIN community_sections cs ON cs.id = lg.section_id
+       WHERE c.record_origin != 'sandbox_demo'
+       ORDER BY c.id`
+    )
+    .all();
+
+  const properties = db
+    .prepare(
+      `SELECT pr.*, cs.project_code, cs.community_name, lg.lot_label, pl.link_state
+       FROM properties pr
+       LEFT JOIN property_links pl ON pl.property_id = pr.id
+       LEFT JOIN lot_groups lg ON lg.id = pl.lot_group_id
+       LEFT JOIN community_sections cs ON cs.id = lg.section_id
+       WHERE pr.record_origin != 'sandbox_demo'
+       ORDER BY pr.id`
+    )
+    .all();
+
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(flat), 'Permit Tracker Export');
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(attention), 'Attention');
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(revisions), 'Permit Revisions');
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(masterfile), 'Masterfile Plan Tracker');
   XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(mst), 'MST Reference IDs');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(properties), 'Properties');
+  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(contacts), 'Contacts');
   return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
 }

@@ -20,6 +20,7 @@ export const DEFAULT_RULESET = Object.freeze({
       label: 'Permit Release',
       role: 'internal_release',
       required: 'if_present',
+      completionRole: true,
       match: ['permit\\s*release'],
     },
     {
@@ -27,50 +28,107 @@ export const DEFAULT_RULESET = Object.freeze({
       label: 'Permit Ordered',
       role: 'permit_ordered',
       required: 'if_present',
+      completionRole: true,
       match: ['permit\\s*ordered', 'tol\\s*permit\\s*ordered'],
     },
     {
-      id: 'utility_ordered',
-      label: 'Utility Ordered / Requested',
-      role: 'utility_ordered',
+      id: 'combined_ws_requested',
+      label: 'Water & Sewer Requested',
+      role: 'combined_ws_requested',
       required: 'if_present',
+      completionRole: true,
+      // Combined W/S column only — do not treat as water-only or sewer-only
       match: [
         'w\\/?s\\s*(ordered|requested)',
-        '(pw|loco|pww).*(ordered|requested)',
-        '(water|sewer).*(ordered|requested)',
         'water\\s*&\\s*sewer.*(ordered|requested)',
+        'water\\s*and\\s*sewer.*(ordered|requested)',
+        'water\\s*&\\s*sewer\\s*pww\\s*requested',
       ],
+    },
+    {
+      id: 'water_requested',
+      label: 'Water Requested',
+      role: 'water_requested',
+      required: 'if_present',
+      completionRole: true,
+      excludeIf: ['water\\s*&\\s*sewer', 'w\\/?s\\s'],
+      match: ['loco\\s*water\\s*(ordered|requested)', '\\bwater\\s*(ordered|requested)'],
+    },
+    {
+      id: 'sewer_requested',
+      label: 'Sewer Requested',
+      role: 'sewer_requested',
+      required: 'if_present',
+      completionRole: true,
+      excludeIf: ['water\\s*&\\s*sewer', 'w\\/?s\\s'],
+      match: ['pw\\s*sewer\\s*(ordered|requested)', '\\bsewer\\s*(ordered|requested)'],
     },
     {
       id: 'permit_received',
       label: 'Permit Received',
       role: 'permit_received',
       required: 'if_present',
+      completionRole: true,
       match: ['permit\\s*received'],
     },
     {
-      id: 'utility_received',
-      label: 'Utility Received',
-      role: 'utility_received',
+      id: 'combined_ws_received',
+      label: 'Water & Sewer Received',
+      role: 'combined_ws_received',
       required: 'if_present',
-      match: [
-        'w\\/?s\\s*received',
-        '(pw|loco|pww).*(received)',
-        '(water|sewer).*(received)',
-      ],
+      completionRole: true,
+      match: ['w\\/?s\\s*received', 'water\\s*&\\s*sewer.*received'],
     },
     {
-      id: 'utility_paid',
-      label: 'Water / Sewer Paid',
-      role: 'utility_paid',
+      id: 'water_received',
+      label: 'Water Received',
+      role: 'water_received',
       required: 'if_present',
-      match: ['(water|sewer|w\\/?s).*\\bpaid\\b', '\\b(water|sewer)\\s*paid\\b'],
+      completionRole: true,
+      excludeIf: ['water\\s*&\\s*sewer', 'w\\/?s\\s'],
+      match: ['loco\\s*water\\s*received', '\\bwater\\s*received\\b'],
+    },
+    {
+      id: 'sewer_received',
+      label: 'Sewer Received',
+      role: 'sewer_received',
+      required: 'if_present',
+      completionRole: true,
+      excludeIf: ['water\\s*&\\s*sewer', 'w\\/?s\\s'],
+      match: ['\\bsewer\\s*received\\b'],
+    },
+    {
+      id: 'combined_ws_paid',
+      label: 'Water & Sewer Paid',
+      role: 'combined_ws_paid',
+      required: 'if_present',
+      completionRole: true,
+      match: ['water\\s*&\\s*sewer.*\\bpaid\\b', 'w\\/?s.*\\bpaid\\b'],
+    },
+    {
+      id: 'water_paid',
+      label: 'Water Paid',
+      role: 'water_paid',
+      required: 'if_present',
+      completionRole: true,
+      excludeIf: ['water\\s*&\\s*sewer', 'w\\/?s\\s'],
+      match: ['\\bwater\\s*paid\\b'],
+    },
+    {
+      id: 'sewer_paid',
+      label: 'Sewer Paid',
+      role: 'sewer_paid',
+      required: 'if_present',
+      completionRole: true,
+      excludeIf: ['water\\s*&\\s*sewer', 'w\\/?s\\s'],
+      match: ['\\bsewer\\s*paid\\b'],
     },
     {
       id: 'startsheet',
       label: 'StartSheet Distributed',
       role: 'startsheet',
       required: 'if_present',
+      completionRole: true,
       match: ['start\\s*sheet', 'startsheet'],
     },
   ],
@@ -141,16 +199,36 @@ function labelMatches(label, patterns) {
   });
 }
 
-export function classifyMilestoneValue(value, valueKind = 'text') {
+/**
+ * Classify a milestone cell. `na` is preserved as unconfirmed_na (never global completion)
+ * unless an explicit record-level waiver exists. Future completion dates are not proof today.
+ */
+export function classifyMilestoneValue(value, valueKind = 'text', { today, waived = false, completionRole = false } = {}) {
   if (value == null || String(value).trim() === '') {
     return { status: 'missing', detail: 'empty' };
   }
   const s = String(value).trim();
+  const asOf = today || new Date();
   if (/^(na|n\/a|n\.a\.?)$/i.test(s)) {
-    return { status: 'waived', detail: 'marked n/a' };
+    if (waived) {
+      return { status: 'waived', detail: 'explicit record-level waiver for n/a' };
+    }
+    return {
+      status: 'unconfirmed_na',
+      detail: 'n/a preserved — needs community/field rule or record-level waiver',
+    };
   }
   if (valueKind === 'date' || /^\d{4}-\d{2}-\d{2}/.test(s)) {
-    return { status: 'satisfied', detail: 'date evidence', date: s.slice(0, 10) };
+    const date = s.slice(0, 10);
+    const days = daysUntil(date, asOf);
+    if (completionRole && days != null && days > 0) {
+      return {
+        status: 'future',
+        detail: `future date ${date} is not proof of completion today`,
+        date,
+      };
+    }
+    return { status: 'satisfied', detail: 'date evidence', date };
   }
   if (
     /^(apply|can apply|rqst|request(ed)?|need\b|submitted|resubmitted|john\/bk|ayes|pending)/i.test(
@@ -163,7 +241,30 @@ export function classifyMilestoneValue(value, valueKind = 'text') {
 }
 
 function findMilestonesForRule(milestones, rule) {
-  return milestones.filter((m) => labelMatches(m.label, rule.match));
+  return milestones.filter((m) => {
+    if (!labelMatches(m.label, rule.match)) return false;
+    if (rule.excludeIf && labelMatches(m.label, rule.excludeIf)) return false;
+    return true;
+  });
+}
+
+function findHeadersForRule(headers, rule) {
+  return (headers || []).filter((h) => {
+    if (!labelMatches(h.label, rule.match)) return false;
+    if (rule.excludeIf && labelMatches(h.label, rule.excludeIf)) return false;
+    return true;
+  });
+}
+
+function hasWaiver(permitId, milestoneKey) {
+  if (!milestoneKey) return false;
+  return Boolean(
+    db
+      .prepare(
+        `SELECT id FROM milestone_waivers WHERE permit_record_id = ? AND milestone_key = ?`
+      )
+      .get(permitId, milestoneKey)
+  );
 }
 
 function daysUntil(isoDate, today = new Date()) {
@@ -219,61 +320,56 @@ function findOpenRevisions(projectCode, lotLabel) {
   });
 }
 
+/**
+ * Official AHJ verification is supporting evidence — not required for every internal Ready.
+ * Preserve last-known official_status on failed checks (caller never clears it).
+ */
 function evaluateOfficialSupport(permit) {
-  const gaps = [];
   const evidence = [];
+  const freshness = {
+    last_check_outcome: permit.last_check_outcome || 'never',
+    last_successful_check_at: permit.last_successful_check_at || null,
+    last_check_error: permit.last_check_error || '',
+    stale_or_failed: ['failed', 'unavailable'].includes(permit.last_check_outcome),
+  };
+  let status = 'not_applicable';
   if (['issued', 'approved'].includes(permit.official_status)) {
+    status = 'verified';
     evidence.push({
       id: 'official_status',
       label: 'Official status',
       status: 'satisfied',
-      detail: permit.official_status,
+      detail: `${permit.official_status} (live verification)`,
       source: 'connector',
     });
   } else if (['revision_required', 'cancelled'].includes(permit.official_status)) {
-    return {
-      status: 'blocked',
-      evidence: [
-        {
+    status = 'blocked';
+    evidence.push({
+      id: 'official_status',
+      label: 'Official status',
+      status: 'in_progress',
+      detail: permit.official_status,
+      source: 'connector',
+    });
+  } else if (permit.primary_official_id) {
+    if (freshness.stale_or_failed) {
+      status = 'stale_or_failed';
+    } else if (permit.last_check_outcome === 'never' || !permit.last_successful_check_at) {
+      status = 'unverified';
+    } else {
+      status = 'observed';
+      if (permit.official_status && permit.official_status !== 'unknown') {
+        evidence.push({
           id: 'official_status',
           label: 'Official status',
-          status: 'in_progress',
+          status: 'ambiguous',
           detail: permit.official_status,
           source: 'connector',
-        },
-      ],
-      gaps: [],
-    };
-  } else if (permit.primary_official_id) {
-    if (permit.last_check_outcome === 'unavailable' || permit.last_check_outcome === 'failed') {
-      gaps.push({
-        id: 'automation_gap',
-        label: 'AHJ automation',
-        status: 'gap',
-        detail:
-          permit.last_check_error ||
-          `Last check ${permit.last_check_outcome} — keep workbook evidence; do not invent Ready`,
-        source: 'connector',
-      });
-    } else if (permit.last_check_outcome === 'never' || !permit.last_successful_check_at) {
-      gaps.push({
-        id: 'official_unverified',
-        label: 'Official status unverified',
-        status: 'gap',
-        detail: 'No successful AHJ check yet',
-        source: 'connector',
-      });
-    } else if (permit.official_status && permit.official_status !== 'unknown') {
-      evidence.push({
-        id: 'official_status',
-        label: 'Official status',
-        status: 'ambiguous',
-        detail: permit.official_status,
-        source: 'connector',
-      });
+        });
+      }
     }
   }
-  return { status: 'ok', evidence, gaps };
+  return { status, evidence, freshness };
 }
 
 /**
@@ -318,12 +414,12 @@ export function assessPermitReadiness(permitId, { ruleset, today } = {}) {
   const gaps = [];
   const informational = [];
 
-  // Target start (informational) — lot milestone first, else section header presence only
+  // Target start (informational)
   for (const info of rules.informational || []) {
     const hits = findMilestonesForRule(milestones, info);
     if (hits.length) {
       const m = hits[0];
-      const ev = classifyMilestoneValue(m.value, m.value_kind);
+      const ev = classifyMilestoneValue(m.value, m.value_kind, { today: asOf, completionRole: false });
       informational.push({
         id: info.id,
         label: m.label || info.label,
@@ -337,14 +433,20 @@ export function assessPermitReadiness(permitId, { ruleset, today } = {}) {
   const targetInfo = informational.find((i) => i.id === 'target_start' && i.date);
   const targetStart = targetInfo?.date || null;
   const daysToStart = daysUntil(targetStart, asOf);
+  const approachingDays = Number(rules.approachingStartDays || 45);
+  const approaching_start =
+    targetStart != null && daysToStart != null && daysToStart >= 0 && daysToStart <= approachingDays;
+  const overdue_target = targetStart != null && daysToStart != null && daysToStart < 0;
 
+  let applicableRuleCount = 0;
   for (const rule of rules.prerequisites || []) {
     const hits = findMilestonesForRule(milestones, rule);
-    const headerHits = (sectionHeaders || []).filter((h) => labelMatches(h.label, rule.match));
+    const headerHits = findHeadersForRule(sectionHeaders, rule);
     const presentInSection = headerHits.length > 0 || hits.length > 0;
 
     if (!presentInSection) {
       if (rule.required === 'always') {
+        applicableRuleCount += 1;
         outstanding.push({
           id: rule.id,
           label: rule.label,
@@ -354,9 +456,9 @@ export function assessPermitReadiness(permitId, { ruleset, today } = {}) {
       }
       continue;
     }
+    applicableRuleCount += 1;
 
     if (!hits.length) {
-      // Column exists on the section (or sibling lots) but this lot cell was blank — not Ready
       outstanding.push({
         id: rule.id,
         label: headerHits[0]?.label || rule.label,
@@ -369,15 +471,20 @@ export function assessPermitReadiness(permitId, { ruleset, today } = {}) {
       continue;
     }
 
-    // Aggregate: satisfied if any hit satisfied/waived; else worst status across hits
     const evals = hits.map((m) => ({
       milestone: m,
-      ...classifyMilestoneValue(m.value, m.value_kind),
+      ...classifyMilestoneValue(m.value, m.value_kind, {
+        today: asOf,
+        waived: hasWaiver(permitId, m.key),
+        completionRole: Boolean(rule.completionRole),
+      }),
     }));
     const best =
       evals.find((e) => e.status === 'satisfied') ||
       evals.find((e) => e.status === 'waived') ||
       evals.find((e) => e.status === 'in_progress') ||
+      evals.find((e) => e.status === 'future') ||
+      evals.find((e) => e.status === 'unconfirmed_na') ||
       evals.find((e) => e.status === 'ambiguous') ||
       evals[0];
     const row = {
@@ -391,10 +498,32 @@ export function assessPermitReadiness(permitId, { ruleset, today } = {}) {
     };
     if (best.status === 'satisfied' || best.status === 'waived') {
       satisfied.push(row);
-    } else if (best.status === 'ambiguous') {
-      gaps.push({ ...row, status: 'ambiguous' });
+    } else if (['ambiguous', 'unconfirmed_na', 'future'].includes(best.status)) {
+      gaps.push(row);
     } else {
       outstanding.push(row);
+    }
+  }
+
+  // Deck/shed/sprinkler applicability review when columns exist
+  for (const opt of rules.optional || []) {
+    const headerHits = findHeadersForRule(sectionHeaders, opt);
+    const hits = findMilestonesForRule(milestones, opt);
+    if (!headerHits.length && !hits.length) continue;
+    const cfg = db
+      .prepare(
+        `SELECT state FROM applicability_config
+         WHERE feature_key = ? AND (lot_group_id = ? OR community_section_id = ?)
+         ORDER BY lot_group_id DESC LIMIT 1`
+      )
+      .get(opt.role || opt.id, permit.lot_group_id, permit.section_id);
+    if (!cfg || cfg.state === 'needs_confirmation') {
+      gaps.push({
+        id: `applicability:${opt.id}`,
+        label: opt.label,
+        status: 'needs_confirmation',
+        detail: 'Applicability Needs confirmation (Required / Not applicable / Needs confirmation)',
+      });
     }
   }
 
@@ -407,34 +536,27 @@ export function assessPermitReadiness(permitId, { ruleset, today } = {}) {
     revision_id: r.id,
     lots_potentially_affected: true,
   }));
+  gaps.push(...revisionFlags);
 
   const official = evaluateOfficialSupport(permit);
-  for (const e of official.evidence) {
-    if (e.status === 'satisfied') satisfied.push(e);
-    else if (e.status === 'in_progress') outstanding.push(e);
-    else gaps.push(e);
+  // Official revision/cancel blocks workbook Ready; unverified AHJ does not.
+  if (official.status === 'blocked') {
+    for (const e of official.evidence) outstanding.push(e);
   }
-  gaps.push(...official.gaps);
-  gaps.push(...revisionFlags);
 
   let state = READINESS_STATES.READY;
   if (outstanding.length) {
     state = READINESS_STATES.BLOCKED;
-  } else if (gaps.length || official.status === 'blocked') {
+  } else if (gaps.length) {
     state = READINESS_STATES.NEEDS_VERIFICATION;
-  } else if (!satisfied.length && !milestones.length) {
+  } else if (applicableRuleCount === 0) {
     state = READINESS_STATES.NEEDS_VERIFICATION;
     gaps.push({
-      id: 'no_milestones',
-      label: 'No workbook milestones',
+      id: 'no_applicable_rules',
+      label: 'No applicable prerequisite rules',
       status: 'gap',
-      detail: 'Cannot assess Ready without evidence',
+      detail: 'Cannot be Ready with zero confirmed applicable prerequisites',
     });
-  }
-
-  // Official hard block overrides ready
-  if (official.status === 'blocked') {
-    state = READINESS_STATES.BLOCKED;
   }
 
   const summaryParts = [];
@@ -443,8 +565,8 @@ export function assessPermitReadiness(permitId, { ruleset, today } = {}) {
       `Target start ${targetStart}` +
         (daysToStart == null
           ? ''
-          : daysToStart < 0
-            ? ` (${Math.abs(daysToStart)}d past)`
+          : overdue_target
+            ? ` (${Math.abs(daysToStart)}d overdue — not actual start)`
             : ` (in ${daysToStart}d)`)
     );
   }
@@ -465,9 +587,21 @@ export function assessPermitReadiness(permitId, { ruleset, today } = {}) {
         .join(', ')}`
     );
   }
+  if (official.status && official.status !== 'not_applicable') {
+    summaryParts.push(`AHJ verification: ${official.status}`);
+  }
+
+  // Lot-group summary across permit siblings (shared milestones / worst state)
+  const siblingIds = db
+    .prepare(
+      `SELECT id FROM permit_records WHERE lot_group_id = ? AND record_origin = 'import' ORDER BY id`
+    )
+    .all(permit.lot_group_id)
+    .map((r) => r.id);
 
   return {
     permit_record_id: permitId,
+    lot_group_id: permit.lot_group_id,
     project_code: permit.project_code,
     community_name: permit.community_name,
     lot_label: permit.lot_label,
@@ -483,16 +617,16 @@ export function assessPermitReadiness(permitId, { ruleset, today } = {}) {
     assessment_note: rules.note,
     target_start: targetStart,
     days_to_start: daysToStart,
-    approaching_start:
-      targetStart != null &&
-      daysToStart != null &&
-      daysToStart >= 0 &&
-      daysToStart <= Number(rules.approachingStartDays || 21),
+    approaching_start,
+    overdue_target,
+    applicable_rule_count: applicableRuleCount,
     outstanding,
     satisfied,
     gaps,
     informational,
     open_revisions: openRevisions,
+    official_verification: official,
+    sibling_permit_ids: siblingIds,
     owner: permit.owner,
     next_action: permit.next_action,
     next_action_due: permit.next_action_due,
@@ -535,7 +669,8 @@ export function persistAssessment(assessment) {
     assessment.ruleset_key,
     assessment.assessed_at
   );
-  db.prepare(`UPDATE permit_records SET readiness_state = ?, updated_at = datetime('now') WHERE id = ?`).run(
+  // Do not bump business-modified updated_at on assessment recalc alone
+  db.prepare(`UPDATE permit_records SET readiness_state = ? WHERE id = ?`).run(
     assessment.state,
     assessment.permit_record_id
   );
@@ -548,22 +683,47 @@ export function updateLotReadiness(permitId, opts = {}) {
   return assessment;
 }
 
+function worstState(states) {
+  if (states.includes(READINESS_STATES.BLOCKED)) return READINESS_STATES.BLOCKED;
+  if (states.includes(READINESS_STATES.NEEDS_VERIFICATION)) return READINESS_STATES.NEEDS_VERIFICATION;
+  if (states.includes(READINESS_STATES.READY)) return READINESS_STATES.READY;
+  return READINESS_STATES.NEEDS_VERIFICATION;
+}
+
 export function rebuildAllReadiness(opts = {}) {
   const ruleset = opts.ruleset || getReadinessRuleset();
   const ids = db
     .prepare(`SELECT id FROM permit_records WHERE record_origin = 'import' ORDER BY id`)
     .all()
     .map((r) => r.id);
-  const counts = { ready: 0, blocked: 0, needs_verification: 0, total: 0 };
   const assessments = [];
   for (const id of ids) {
     const a = updateLotReadiness(id, { ...opts, ruleset });
-    if (!a) continue;
-    counts.total += 1;
-    counts[a.state] = (counts[a.state] || 0) + 1;
-    assessments.push(a);
+    if (a) assessments.push(a);
   }
-  return { counts, assessments, ruleset_key: ruleset.key };
+
+  // Lot/group counts: one row per lot_group (worst sibling state) — avoid duplicate lot counts
+  const byLot = new Map();
+  for (const a of assessments) {
+    const key = a.lot_group_id;
+    const prev = byLot.get(key);
+    if (!prev) byLot.set(key, a);
+    else byLot.set(key, { ...prev, state: worstState([prev.state, a.state]) });
+  }
+  const lotCounts = { ready: 0, blocked: 0, needs_verification: 0, total: byLot.size };
+  for (const a of byLot.values()) {
+    lotCounts[a.state] = (lotCounts[a.state] || 0) + 1;
+  }
+  const permitCounts = { ready: 0, blocked: 0, needs_verification: 0, total: assessments.length };
+  for (const a of assessments) {
+    permitCounts[a.state] = (permitCounts[a.state] || 0) + 1;
+  }
+  return {
+    counts: lotCounts,
+    permitCounts,
+    assessments,
+    ruleset_key: ruleset.key,
+  };
 }
 
 export function getStoredAssessment(permitId) {

@@ -38,6 +38,27 @@ import {
 } from './sources/registry.js';
 import { inspectArcGisUrl, SEED_ARCGIS_CANDIDATES } from './sources/arcgisDiscover.js';
 import { connectLocation, discoveryProviderInterface } from './sources/connectLocation.js';
+import {
+  upsertProperty,
+  linkPropertyToLot,
+  listPropertiesForPermit,
+  previewCrosswalk,
+  commitCrosswalk,
+  confirmationHistory,
+  getProperty,
+  missingPropertyLotCount,
+} from './property.js';
+import {
+  listContacts,
+  addManualContact,
+  setContactStatus,
+  findContactsForProperty,
+  contactsReviewNeededCount,
+  contactsAvailableLotCount,
+  CONTACT_ROLES,
+  tracerfyConfig,
+  reconcileTimedOutJob,
+} from './contacts.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, '..');
@@ -125,6 +146,9 @@ app.get('/api/permits', (req, res) => {
     internal_status,
     readiness_state,
     approaching_start,
+    missing_property,
+    contacts_available,
+    contact_review_needed,
     has_official_id,
     fairfax_shaped,
     include_demo,
@@ -185,6 +209,26 @@ app.get('/api/permits', (req, res) => {
     sql += ` AND ra.target_start IS NOT NULL AND ra.days_to_start IS NOT NULL
              AND ra.days_to_start >= 0 AND ra.days_to_start <= ?`;
     params.push(Number(getReadinessRuleset().approachingStartDays || 45));
+  }
+  if (missing_property === 'true') {
+    sql += ` AND NOT EXISTS (
+      SELECT 1 FROM property_links pl
+      WHERE pl.lot_group_id = lg.id AND pl.link_state IN ('candidate','confirmed')
+    )`;
+  }
+  if (contacts_available === 'true') {
+    sql += ` AND EXISTS (
+      SELECT 1 FROM contacts c
+      WHERE c.lot_group_id = lg.id AND c.status IN ('candidate','confirmed')
+        AND c.record_origin != 'sandbox_demo'
+    )`;
+  }
+  if (contact_review_needed === 'true') {
+    sql += ` AND EXISTS (
+      SELECT 1 FROM contacts c
+      WHERE c.lot_group_id = lg.id AND c.status = 'candidate'
+        AND c.record_origin != 'sandbox_demo'
+    )`;
   }
   if (has_official_id === 'true') {
     sql += ` AND p.primary_official_id IS NOT NULL AND p.primary_official_id != ''`;
@@ -259,7 +303,27 @@ app.get('/api/permits/:id', (req, res) => {
     .all(permit.id);
   const readiness =
     assessPermitReadiness(permit.id) || getStoredAssessment(permit.id) || null;
-  res.json({ permit, milestones, officialIds, history, snapshots, readiness });
+  const properties = listPropertiesForPermit(permit.id);
+  const contacts = listContacts({ permitId: permit.id, includeDemo: true });
+  const jobs = db
+    .prepare(
+      `SELECT id, provider, mode, endpoint, status, estimated_credits, actual_credits, error, created_at, finished_at
+       FROM contact_jobs WHERE permit_record_id = ? OR lot_group_id = ? ORDER BY id DESC LIMIT 20`
+    )
+    .all(permit.id, permit.lot_group_id);
+  res.json({
+    permit,
+    milestones,
+    officialIds,
+    history,
+    snapshots,
+    readiness,
+    properties,
+    contacts,
+    contactJobs: jobs,
+    contactRoles: CONTACT_ROLES,
+    tracerfy: tracerfyConfig(),
+  });
 });
 
 app.patch('/api/permits/:id', (req, res) => {
@@ -713,7 +777,8 @@ app.get('/api/stats', (_req, res) => {
     demoPermits: db
       .prepare(`SELECT COUNT(*) AS c FROM permit_records WHERE record_origin != 'import'`)
       .get().c,
-    readiness: {
+    readiness: rebuildAllReadiness().counts,
+    readinessByPermit: {
       ready: db
         .prepare(
           `SELECT COUNT(*) AS c FROM permit_records WHERE record_origin = 'import' AND readiness_state = 'ready'`
@@ -730,7 +795,120 @@ app.get('/api/stats', (_req, res) => {
         )
         .get().c,
     },
+    missingPropertyLots: missingPropertyLotCount(),
+    contactsAvailableLots: contactsAvailableLotCount(),
+    contactReviewNeeded: contactsReviewNeededCount(),
+    tracerfy: tracerfyConfig(),
   });
+});
+
+// —— Property identity ——
+app.get('/api/properties/:id', (req, res) => {
+  const property = getProperty(Number(req.params.id));
+  if (!property) return res.status(404).json({ error: 'Not found' });
+  res.json({
+    property,
+    history: confirmationHistory(property.id),
+    contacts: listContacts({ propertyId: property.id, includeDemo: true }),
+  });
+});
+
+app.post('/api/properties', (req, res) => {
+  const property = upsertProperty(req.body || {}, { actor: currentUser() });
+  const { lot_group_id, permit_record_id, link_state } = req.body || {};
+  if (lot_group_id) {
+    linkPropertyToLot({
+      propertyId: property.id,
+      lotGroupId: Number(lot_group_id),
+      permitRecordId: permit_record_id ? Number(permit_record_id) : null,
+      linkState: link_state || 'candidate',
+      evidence: { source: 'manual_ui' },
+      confirmedBy: link_state === 'confirmed' ? currentUser() : null,
+    });
+  }
+  res.json({ property, properties: permit_record_id ? listPropertiesForPermit(permit_record_id) : [] });
+});
+
+app.post('/api/properties/:id/confirm-link', (req, res) => {
+  const property = getProperty(Number(req.params.id));
+  if (!property) return res.status(404).json({ error: 'Not found' });
+  const { lot_group_id, permit_record_id } = req.body || {};
+  if (!lot_group_id) return res.status(400).json({ error: 'lot_group_id required' });
+  linkPropertyToLot({
+    propertyId: property.id,
+    lotGroupId: Number(lot_group_id),
+    permitRecordId: permit_record_id ? Number(permit_record_id) : null,
+    linkState: 'confirmed',
+    evidence: { source: 'manual_confirm' },
+    confirmedBy: currentUser(),
+  });
+  res.json({
+    property: getProperty(property.id),
+    properties: permit_record_id ? listPropertiesForPermit(permit_record_id) : listPropertiesForPermit(0),
+  });
+});
+
+app.post('/api/property-crosswalk/preview', (req, res) => {
+  const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+  res.json({ preview: previewCrosswalk(rows) });
+});
+
+app.post('/api/property-crosswalk/commit', (req, res) => {
+  const rows = Array.isArray(req.body?.rows) ? req.body.rows : [];
+  const preview = rows[0]?.match_status ? rows : previewCrosswalk(rows);
+  const summary = commitCrosswalk(preview, { actor: currentUser() });
+  res.json({ summary, preview });
+});
+
+// —— Contacts / Tracerfy ——
+app.get('/api/contacts/meta', (_req, res) => {
+  res.json({ roles: CONTACT_ROLES, tracerfy: tracerfyConfig() });
+});
+
+app.post('/api/contacts', (req, res) => {
+  const contact = addManualContact(req.body || {}, { actor: currentUser() });
+  res.json({ contact });
+});
+
+app.post('/api/contacts/:id/status', (req, res) => {
+  const contact = setContactStatus(Number(req.params.id), req.body?.status, {
+    reason: req.body?.reason || '',
+    actor: currentUser(),
+  });
+  res.json({ contact });
+});
+
+app.post('/api/contacts/find', async (req, res) => {
+  try {
+    const result = await findContactsForProperty({
+      propertyId: Number(req.body?.property_id),
+      permitRecordId: req.body?.permit_record_id ? Number(req.body.permit_record_id) : null,
+      endpointKey: req.body?.endpoint || 'instant_trace',
+      forceFail: req.body?.forceFail || null,
+      allowSandboxAttach: Boolean(req.body?.allowSandboxAttach),
+    });
+    res.json(result);
+  } catch (e) {
+    res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
+app.post('/api/contacts/jobs/:id/reconcile', (req, res) => {
+  res.json(reconcileTimedOutJob(Number(req.params.id)));
+});
+
+app.post('/api/milestones/:permitId/waiver', (req, res) => {
+  const permitId = Number(req.params.permitId);
+  const { milestone_key, reason } = req.body || {};
+  if (!milestone_key) return res.status(400).json({ error: 'milestone_key required' });
+  db.prepare(
+    `INSERT INTO milestone_waivers(permit_record_id, milestone_key, reason, waived_by)
+     VALUES (?, ?, ?, ?)
+     ON CONFLICT(permit_record_id, milestone_key) DO UPDATE SET reason = excluded.reason, waived_by = excluded.waived_by`
+  ).run(permitId, milestone_key, reason || '', currentUser());
+  updateLotReadiness(permitId);
+  rebuildAttention();
+  res.json({ ok: true, readiness: getStoredAssessment(permitId) });
 });
 
 app.post('/api/seed', (req, res) => {

@@ -42,7 +42,8 @@ export const SEED_SOURCES = [
       'Issued-heavy Building Records PLUS layer; pending/comments/holds/inspections unavailable on this layer. City of Fairfax is separate.',
     evidence:
       'Live RO queries return status + milestone dates for ALTC/ALTR/BLDR (BLDC only with confirmed Fairfax mapping).',
-    last_verified_at: new Date().toISOString(),
+    // Seed metadata only — real verification timestamp set after live check
+    last_verified_at: null,
     reusable: 1,
   },
   {
@@ -65,7 +66,7 @@ export const SEED_SOURCES = [
       'Authoritative for BLD/ZNA/BPR/MST active workflow, but no verified public per-permit status API matching workbook IDs. HTML portal; do not bypass login/CAPTCHA.',
     evidence:
       'ePortal documented at pwcva.gov; GIS EGov/EGov_ePortal MapServer is basemap/parcels only (no permit record layer). Workbook IDs BLD2026-*/ZNA2026-* not present on public Use Permits or Planning Pending Cases layers.',
-    last_verified_at: new Date().toISOString(),
+    last_verified_at: null,
     reusable: 0,
   },
   {
@@ -93,7 +94,7 @@ export const SEED_SOURCES = [
       'Zoning SUP/NCU only (PLN* case numbers). Does NOT cover workbook building/zoning permits BLD*/ZNA*/BPR*/MST*. Not an active building-permit tracker.',
     evidence:
       'RO query returns features with ZoningCaseNumber/UsePermitStatus. Query for ZNA%/BLD% returned zero features.',
-    last_verified_at: new Date().toISOString(),
+    last_verified_at: null,
     reusable: 1,
   },
   {
@@ -113,7 +114,7 @@ export const SEED_SOURCES = [
     state: 'discovered',
     coverage_limitations: 'Planning cases (PLN/PFR), not building permits. Candidate for planning ops only.',
     evidence: 'RO sample returned PLN*/PFR* cases with staff report links.',
-    last_verified_at: new Date().toISOString(),
+    last_verified_at: null,
     reusable: 1,
   },
   {
@@ -136,7 +137,7 @@ export const SEED_SOURCES = [
       'Authoritative for active BLDC/ZONC/MASTR workflow. No verified public per-permit API. Public HTML search only; do not bypass controls. Town AHJs may still apply by record type.',
     evidence:
       'LandMARC docs + public search tutorials. Landmarc_GUIDs FeatureServer tables advertise PlanNumber/PlanStatus but all public queries return HTTP 400 — practical blocker.',
-    last_verified_at: new Date().toISOString(),
+    last_verified_at: null,
     reusable: 0,
   },
   {
@@ -158,7 +159,7 @@ export const SEED_SOURCES = [
       'Issued residential only; old LMIS-style permit numbers (B80…), not LandMARC BLDC-YYYY-n. Latest sampled issue dates ~2018–2019. 0 matches for workbook BLDC-2026-* IDs. Not suitable for active workflow tracking.',
     evidence:
       'RO query count=3916; PERMIT_NUMBER LIKE BLDC% → 0; workbook IDs unmatched. Useful as historical issued geography only after ID-scheme mapping research.',
-    last_verified_at: new Date().toISOString(),
+    last_verified_at: null,
     reusable: 1,
   },
   {
@@ -177,7 +178,7 @@ export const SEED_SOURCES = [
     coverage_limitations:
       'Metadata lists PlanNumber/PlanStatus but Query operations fail (400). Practical access blocker — not not-yet-investigated.',
     evidence: 'Layer metadata OK; query/count/ids all return Unable to complete operation / Failed to execute query.',
-    last_verified_at: new Date().toISOString(),
+    last_verified_at: null,
     reusable: 1,
   },
   {
@@ -195,7 +196,7 @@ export const SEED_SOURCES = [
     state: 'discovered',
     coverage_limitations: 'Issued-only historical reports; not active status. Manual/batch import candidate only.',
     evidence: 'County page documents Excel/PDF monthly issued reports; additional detail still in LandMARC.',
-    last_verified_at: new Date().toISOString(),
+    last_verified_at: null,
     reusable: 0,
   },
 ];
@@ -285,6 +286,10 @@ export function activateSource(key, { reviewedBy = 'operator' } = {}) {
   if (!src) throw new Error('Source not found');
   if (src.state !== 'verified' && src.state !== 'degraded') {
     throw new Error(`Source state=${src.state}; only verified/degraded may activate after review`);
+  }
+  // Metadata ≠ operational connection — require a real adapter
+  if (!src.adapter_type || src.adapter_type === 'none') {
+    throw new Error('Source has no operational adapter; metadata-only entries cannot activate');
   }
   db.prepare(
     `UPDATE source_registry SET activated = 1, activated_at = datetime('now'), activated_by = ? WHERE id = ?`

@@ -31,6 +31,18 @@ export default function App() {
   const [officialIds, setOfficialIds] = useState([]);
   const [history, setHistory] = useState([]);
   const [readiness, setReadiness] = useState(null);
+  const [properties, setProperties] = useState([]);
+  const [contacts, setContacts] = useState([]);
+  const [contactJobs, setContactJobs] = useState([]);
+  const [tracerfy, setTracerfy] = useState(null);
+  const [propertyForm, setPropertyForm] = useState({
+    site_address: '',
+    city: '',
+    state: 'VA',
+    zip: '',
+    parcel_apn: '',
+    parcel_jurisdiction: '',
+  });
   const [attention, setAttention] = useState([]);
   const [bulk, setBulk] = useState({ internal_status: '', owner: '' });
   const [message, setMessage] = useState('');
@@ -74,6 +86,107 @@ export default function App() {
     setOfficialIds(data.officialIds);
     setHistory(data.history);
     setReadiness(data.readiness || null);
+    setProperties(data.properties || []);
+    setContacts(data.contacts || []);
+    setContactJobs(data.contactJobs || []);
+    setTracerfy(data.tracerfy || null);
+    const confirmed = (data.properties || []).find((p) => p.link_state === 'confirmed');
+    const any = confirmed || (data.properties || [])[0];
+    if (any) {
+      setPropertyForm({
+        site_address: any.site_address || '',
+        city: any.city || '',
+        state: any.state || 'VA',
+        zip: any.zip || '',
+        parcel_apn: any.parcel_apn || '',
+        parcel_jurisdiction: any.parcel_jurisdiction || '',
+      });
+    }
+  }
+
+  async function saveProperty({ confirm = false } = {}) {
+    if (!detail?.lot_group_id) {
+      setMessage('Missing lot_group_id on permit — re-open the row.');
+      return;
+    }
+    setBusy(true);
+    try {
+      await api('/api/properties', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ...propertyForm,
+          lot_group_id: detail.lot_group_id,
+          permit_record_id: detail.id,
+          link_state: confirm ? 'confirmed' : 'candidate',
+        }),
+      });
+      await openDetail(detail.id);
+      setMessage(confirm ? 'Property confirmed for lot.' : 'Property saved as candidate.');
+    } catch (e) {
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function findContacts() {
+    if (!detail) return;
+    const prop = properties[0];
+    if (!prop) {
+      setMessage('Add/confirm a property address first.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const result = await api('/api/contacts/find', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          property_id: prop.id,
+          permit_record_id: detail.id,
+          endpoint: 'instant_trace',
+        }),
+      });
+      setMessage(
+        result.isolation
+          ? `Find contacts: sandbox isolated (${result.isolation}). Production disabled.`
+          : `Find contacts: ${result.saved?.length || 0} candidates (est ${result.estimatedCredits} credits).`
+      );
+      await openDetail(detail.id);
+      await refreshLists();
+    } catch (e) {
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function setContactStatus(id, status) {
+    await api(`/api/contacts/${id}/status`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status }),
+    });
+    if (detail) await openDetail(detail.id);
+  }
+
+  async function saveMilestone(m, value) {
+    if (!detail) return;
+    setBusy(true);
+    try {
+      await api(`/api/permits/${detail.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          milestones: [{ key: m.key, label: m.label, value, value_kind: m.value_kind || 'text' }],
+        }),
+      });
+      await openDetail(detail.id);
+      await refreshLists();
+    } finally {
+      setBusy(false);
+    }
   }
 
   function readinessClass(state) {
@@ -379,6 +492,45 @@ export default function App() {
             <label className="muted">
               <input
                 type="checkbox"
+                checked={filters.missing_property === 'true'}
+                onChange={(e) =>
+                  setFilters((f) => ({
+                    ...f,
+                    missing_property: e.target.checked ? 'true' : '',
+                  }))
+                }
+              />{' '}
+              Missing property
+            </label>
+            <label className="muted">
+              <input
+                type="checkbox"
+                checked={filters.contacts_available === 'true'}
+                onChange={(e) =>
+                  setFilters((f) => ({
+                    ...f,
+                    contacts_available: e.target.checked ? 'true' : '',
+                  }))
+                }
+              />{' '}
+              Contacts available
+            </label>
+            <label className="muted">
+              <input
+                type="checkbox"
+                checked={filters.contact_review_needed === 'true'}
+                onChange={(e) =>
+                  setFilters((f) => ({
+                    ...f,
+                    contact_review_needed: e.target.checked ? 'true' : '',
+                  }))
+                }
+              />{' '}
+              Contact review needed
+            </label>
+            <label className="muted">
+              <input
+                type="checkbox"
                 checked={filters.has_official_id === 'true'}
                 onChange={(e) =>
                   setFilters((f) => ({
@@ -554,7 +706,7 @@ export default function App() {
                       ['source_native_status', 'Source-native status'],
                       ['official_status', 'Official status'],
                       ['internal_status', 'Internal status'],
-                      ['owner', 'Owner'],
+                      ['owner', 'Assigned to'],
                       ['next_action', 'Next action'],
                       ['next_action_due', 'Next action due', 'date'],
                       ['source_url', 'Source URL'],
@@ -636,6 +788,101 @@ export default function App() {
                       ) : null}
                     </>
                   ) : null}
+                  <h3>Property identity</h3>
+                  <p className="muted">
+                    Address/parcel required before Find contacts. Lot ranges need explicit evidence —
+                    no one owner for a whole range without review.
+                  </p>
+                  <div className="fields">
+                    {[
+                      ['site_address', 'Site address'],
+                      ['city', 'City'],
+                      ['state', 'State'],
+                      ['zip', 'ZIP'],
+                      ['parcel_apn', 'Parcel / APN'],
+                      ['parcel_jurisdiction', 'Parcel jurisdiction'],
+                    ].map(([key, label]) => (
+                      <div className="field" key={key}>
+                        <label htmlFor={`prop_${key}`}>{label}</label>
+                        <input
+                          id={`prop_${key}`}
+                          value={propertyForm[key] ?? ''}
+                          onChange={(e) => setPropertyForm({ ...propertyForm, [key]: e.target.value })}
+                        />
+                      </div>
+                    ))}
+                  </div>
+                  <div className="toolbar">
+                    <button type="button" className="btn" disabled={busy} onClick={() => saveProperty()}>
+                      Save property
+                    </button>
+                    <button
+                      type="button"
+                      className="btn primary"
+                      disabled={busy}
+                      onClick={() => saveProperty({ confirm: true })}
+                    >
+                      Confirm property for lot
+                    </button>
+                  </div>
+                  <ul className="history">
+                    {properties.map((p) => (
+                      <li key={p.link_id || p.id}>
+                        <strong>{p.site_address}</strong> · {p.city}, {p.state} {p.zip}
+                        <div className="muted">
+                          {p.link_state} · {p.match_state} · {p.source}
+                          {p.parcel_apn ? ` · APN ${p.parcel_apn}` : ''}
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+
+                  <h3>Contacts</h3>
+                  <p className="muted">
+                    Roles are separate (owner ≠ applicant). Provider return ≠ confirmed contact.
+                    {tracerfy
+                      ? ` Tracerfy mode: ${tracerfy.mode}${tracerfy.productionEnabled ? '' : ' (production disabled)'}.`
+                      : ''}
+                  </p>
+                  <div className="toolbar">
+                    <button type="button" className="btn primary" disabled={busy} onClick={findContacts}>
+                      Find contacts
+                    </button>
+                  </div>
+                  <ul className="history">
+                    {contacts.map((c) => (
+                      <li key={c.id}>
+                        <strong>{c.full_name || c.company || '—'}</strong> · {c.role} · {c.status}
+                        <div className="mono">
+                          {c.phone || '—'} · {c.email || '—'}
+                        </div>
+                        <div className="muted">
+                          {c.provider || 'manual'} · {c.provider_source} · retrieved {c.retrieved_at || '—'}
+                          {c.record_origin === 'sandbox_demo' ? ' · SANDBOX DEMO' : ''}
+                        </div>
+                        <div className="toolbar">
+                          <button type="button" className="btn" onClick={() => setContactStatus(c.id, 'confirmed')}>
+                            Accept
+                          </button>
+                          <button type="button" className="btn" onClick={() => setContactStatus(c.id, 'rejected')}>
+                            Reject
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
+                  {contactJobs.length ? (
+                    <ul className="history">
+                      {contactJobs.slice(0, 3).map((j) => (
+                        <li key={j.id}>
+                          Job {j.id}: {j.status} · {j.mode} · est {j.estimated_credits} / actual{' '}
+                          {j.actual_credits}
+                          {j.error ? ` · ${j.error}` : ''}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
+
                   <h3>Official IDs extracted</h3>
                   <ul className="history">
                     {officialIds.map((o) => (
@@ -650,12 +897,24 @@ export default function App() {
                     {milestones.map((m) => (
                       <li key={m.id}>
                         <strong>{m.label}</strong>
-                        <div className="mono">
-                          {m.value}{' '}
-                          <span className="muted">
-                            [{m.value_kind}] {m.key.startsWith('official_') ? '· connector' : '· internal'}
-                          </span>
-                        </div>
+                        {m.key.startsWith('official_') ? (
+                          <div className="mono">
+                            {m.value}{' '}
+                            <span className="muted">[official · read-only]</span>
+                          </div>
+                        ) : (
+                          <div className="field">
+                            <input
+                              defaultValue={m.value ?? ''}
+                              onBlur={(e) => {
+                                if (String(e.target.value) !== String(m.value ?? '')) {
+                                  saveMilestone(m, e.target.value);
+                                }
+                              }}
+                            />
+                            <span className="muted">[{m.value_kind}] editable · history via Save path</span>
+                          </div>
+                        )}
                       </li>
                     ))}
                   </ul>

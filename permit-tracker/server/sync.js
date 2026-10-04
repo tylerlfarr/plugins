@@ -463,26 +463,18 @@ export function rebuildAttention() {
       resolveAttentionByCondition(`revimpact:${p.id}`);
     }
 
-    // Subsequent official changes (not baseline) in last 48h
-    const recentChange = db
-      .prepare(
-        `SELECT field, old_value, new_value, created_at FROM field_changes
-         WHERE permit_record_id = ? AND source = 'connector'
-           AND field IN ('official_status', 'source_native_status')
-           AND created_at >= datetime('now', '-2 days')
-         ORDER BY id DESC LIMIT 1`
-      )
-      .get(p.id);
-    if (recentChange) {
+    // Official change Attention is created only in applyConnectorResult for subsequent
+    // (non-baseline) observations — never re-emitted from rebuildAttention.
+    if (assessment?.overdue_target && assessment.state !== READINESS_STATES.READY) {
       upsertAttention(
         p.id,
-        'official_change',
-        `Official change: ${recentChange.field} ${recentChange.old_value || '∅'} → ${recentChange.new_value || '∅'}`,
-        `ochg:${p.id}:${recentChange.field}:${recentChange.new_value}`,
-        `ochg:${p.id}`
+        'overdue_target',
+        `Target start ${assessment.target_start} is overdue by ${Math.abs(assessment.days_to_start)}d (not inferred as actual start)`,
+        `overdue_target:${p.id}:${assessment.target_start}`,
+        `overdue_target:${p.id}`
       );
     } else {
-      resolveAttentionByCondition(`ochg:${p.id}`);
+      resolveAttentionByCondition(`overdue_target:${p.id}`);
     }
   }
 }

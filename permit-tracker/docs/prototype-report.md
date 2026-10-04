@@ -6,16 +6,14 @@
 
 ---
 
-## What changed (this milestone — lot-readiness)
+## What changed (this milestone — property + contacts)
 
-- Configurable workbook **lot-readiness** engine (`server/readiness.js`, ruleset `default_workbook_v1`).
-- Per lot: **Ready / Blocked / Needs verification** from section-aware prerequisites (Release / Ordered / Received / utilities / StartSheet) + Target Start.
-- Missing / blank section columns, `APPLY`/`rqst`, open revisions, and AHJ automation gaps never count as Ready.
-- Attention extended: `approaching_start`, `readiness_blocked`, `needs_verification`, `revision_impact`, `official_change` (plus prior kinds).
-- UI: readiness column, filters (state + approaching start), detail outstanding/gaps/satisfied.
-- Export includes readiness summary + outstanding/gaps.
-- Tests: `server/tests/readiness.test.js` · demo: `npm run demo:lot-readiness` (`--source` for store workbook).
-- Requirements map updated vs current app.
+- Readiness integrity fixes: split water≠sewer; `na` unconfirmed until waiver; future dates ≠ completion; AHJ verification separate from workbook Ready; lot-group counts; no `updated_at` bump on recalc; no rebuildAttention official_change; activate requires real adapter.
+- **Property identity** on detail + crosswalk preview/commit (stable community/lot match; ranges need review).
+- **Contacts panel** + Find contacts; roles separate; Accept/Reject; sandbox Tracerfy adapter (production disabled).
+- Filters: Missing property / Contacts available / Contact review needed.
+- Export: Properties + Contacts sheets (sandbox demo contacts excluded).
+- Tests: readiness + `property-contacts.test.js` (34 offline).
 
 ---
 

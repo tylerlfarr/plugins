@@ -31,9 +31,15 @@ function importFixture() {
 
 const { summary } = importFixture();
 
-test('classify milestone values: date / na / APPLY / ambiguous', () => {
-  assert.equal(classifyMilestoneValue('2026-04-01', 'date').status, 'satisfied');
-  assert.equal(classifyMilestoneValue('na', 'text').status, 'waived');
+test('classify milestone values: date / na / APPLY / ambiguous / future', () => {
+  const today = new Date('2026-10-04T12:00:00Z');
+  assert.equal(classifyMilestoneValue('2026-04-01', 'date', { today }).status, 'satisfied');
+  assert.equal(classifyMilestoneValue('na', 'text').status, 'unconfirmed_na');
+  assert.equal(classifyMilestoneValue('na', 'text', { waived: true }).status, 'waived');
+  assert.equal(
+    classifyMilestoneValue('2026-12-01', 'date', { today, completionRole: true }).status,
+    'future'
+  );
   assert.equal(classifyMilestoneValue('APPLY', 'text').status, 'in_progress');
   assert.equal(classifyMilestoneValue('john/bk', 'text').status, 'in_progress');
   assert.equal(classifyMilestoneValue('maybe soon', 'text').status, 'ambiguous');
@@ -88,7 +94,7 @@ test('workbook-complete ID-less lot can be Ready under rules', () => {
   assert.equal(ready.readiness_state, READINESS_STATES.READY);
 });
 
-test('ID without successful AHJ check → Needs verification (not silent Ready)', () => {
+test('AHJ unverified does not block workbook Ready; na stays unconfirmed gap', () => {
   const row = db
     .prepare(
       `SELECT p.id, p.readiness_state FROM permit_records p
@@ -97,9 +103,21 @@ test('ID without successful AHJ check → Needs verification (not silent Ready)'
     )
     .get();
   assert.ok(row);
-  assert.equal(row.readiness_state, READINESS_STATES.NEEDS_VERIFICATION);
-  const a = assessPermitReadiness(row.id);
-  assert.ok(a.gaps.some((g) => g.id === 'official_unverified' || g.id === 'automation_gap'));
+  const a = assessPermitReadiness(row.id, { today: new Date('2026-10-04T12:00:00Z') });
+  // LoCo Water Received = na → needs verification (not silent Ready / not waived)
+  assert.equal(a.state, READINESS_STATES.NEEDS_VERIFICATION);
+  assert.ok(a.gaps.some((g) => g.status === 'unconfirmed_na'));
+  assert.ok(a.official_verification);
+  assert.notEqual(a.official_verification.status, 'verified');
+  // Workbook Ready is independent: ID-less complete lot remains Ready
+  const ready = db
+    .prepare(
+      `SELECT p.id FROM permit_records p
+       JOIN lot_groups lg ON lg.id = p.lot_group_id WHERE lg.lot_label = '10'`
+    )
+    .get();
+  const r = assessPermitReadiness(ready.id, { today: new Date('2026-10-04T12:00:00Z') });
+  assert.equal(r.state, READINESS_STATES.READY);
 });
 
 test('shared open revision flags confirmed matching lots for review', () => {
