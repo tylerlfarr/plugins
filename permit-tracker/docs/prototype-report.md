@@ -8,12 +8,13 @@
 
 ## What changed (this milestone)
 
-- Full 8-tab workbook map; archived sheets stored (not wiped).
-- Import profile separated from reusable core (`importProfile.js`).
-- Data integrity: no live→synthetic fallback; fixtures/demo isolated (`record_origin`); 3-way import conflicts; stable lot identity; multi-record per ID; confirmed jurisdiction wins.
-- Coverage report excludes fixtures/probes (`npm run coverage:report`).
-- Attention: separate clocks (progress vs check vs matching vs overdue); dedupe + resolve; schedule preview (not sent).
-- Offline sanitized fixtures + tests; essential docs in repo; UI says “source workbook” / “import profile”.
+- Source registry + ArcGIS discovery + **Connect a location** UI (review before activate).
+- PWC + Loudoun evidence: both blocked for active workbook IDs — `docs/pwc-loudoun-source-evidence.md`.
+- Fairfax demo = **live lookup + controlled change-detection test**; demo/test origin excluded from coverage.
+- Utility headers suggest geography only (`confirmed=0`).
+- ID-less investigation: 271 shells, 0 accepted auto-matches.
+- Coverage: 22 workbook IDs → 0 live / 22 unavailable (import-origin only).
+- Tests: 19/19 offline; live scripts separate.
 
 ---
 
@@ -21,55 +22,30 @@
 
 | Step | Result |
 |------|--------|
-| Source workbook import | 24 Permit Tracker sections; Revisions / Masterfile / MST active; 4 sheets archived |
-| Re-import | Updates without wiping app-edited milestones; conflicts queued |
-| Fairfax live | Confirmed Fairfax + strong prefixes only; BLDC ambiguous without mapping → unavailable |
-| Unsupported AHJs | Loudoun / PWC / etc. → `unavailable` (no synthetic on import records) |
-| Attention | status_change / no_progress / source_missing / check_failed / unresolved_matching / overdue_action |
-| Structured export | Import-origin only; multi-sheet coexistence workbook |
-| Tests | Offline integrity suite + optional live workbook tests |
-
-See `docs/coverage-matrix.md` after `npm run coverage:report` for live numbers.
+| Source workbook import | 24 sections; secondary sheets + archives |
+| Fairfax live connector | Verified Building Records PLUS (activate via Sources) |
+| PWC GIS Use Permits | Verified for zoning SUP/NCU only — not workbook BLD/ZNA |
+| Loudoun ResBuildingPermits | Inspected; issued/legacy IDs — needs_review, not active tracker |
+| Connect a location | Verified first; candidates need review; never auto-connects |
+| Attention / integrity | Unchanged from prior milestone |
+| Tests | Offline 19/19 |
 
 ---
 
-## How to run / review
+## How to run
 
 ```bash
-cd permit-tracker
-npm install
-npm run seed
-npm run dev
+cd permit-tracker && npm install && npm run seed && npm run build && npm start
 npm test
-npm run coverage:report   # needs network + source workbook
+npm run coverage:report
+npm run demo:fairfax-attention
+npm run investigate:idless
 ```
 
-UI: Permits · Attention (digest preview + conflicts) · Import · Connectors  
-Import → **Import store source workbook** · **Structured export** · **Run Fairfax checks**
+UI: Permits · Attention · Import · **Sources** · Connectors
 
 ---
 
-## Simulated / incomplete
+## Next step
 
-| Item | Mode |
-|------|------|
-| Loudoun / PWC / City of Fairfax / Houston / Harris | **Unsupported** → `unavailable` |
-| Fairfax pending / comments / holds / inspections | **Unavailable** on Building Records PLUS |
-| Address/parcel match for ID-less rows | Not implemented |
-| MST auto-link to lots | Reference only |
-| Email/Slack digest | Preview only — not sent |
-| Auth, multi-tenant, billing | Pre-hosting requirements (pilot pack) |
-
----
-
-## Remaining work before paid pilot
-
-1. Operator validation of per-section milestone synonyms.
-2. Loudoun + PWC: ToS-safe machine access or documented limitation.
-3. AuthN/Z, tenant isolation, backups, hosting.
-4. Address/parcel review queue for ID-less rows.
-5. Optional lot-range explosion (explicit opt-in).
-
-## Next concrete milestone toward customer pilot
-
-Prove weekly saved-work metric on one community: Fairfax morning checks + conflict-aware re-import + Attention digest used in a real standup for 2 weeks; document which manual portal checks were eliminated (hypothesis → evidence).
+**Further source access** (not operator standup trial): authorized PWC/Loudoun machine-readable feeds or documented limitation; operator AHJ confirmation; addresses/parcels for ID-less rows.
