@@ -1,52 +1,40 @@
-# Permit Ledger (local prototype)
+# Permit Ledger (workbook-native prototype)
 
-Builder permit-tracking prototype: community → project → lot → multi-permit inventory, Excel import/export, attention view, change history, and a reusable jurisdiction connector interface.
+Automatically run specific permit checks for communities/lots, preserve the internal spreadsheet workflow, and show what changed before the morning meeting.
 
 ## Quick start
 
 ```bash
 cd permit-tracker
 npm install
-npm run seed
-npm run dev
-```
-
-- API: `http://localhost:4173`
-- UI (Vite): `http://localhost:5173` (proxies `/api`)
-
-Production-ish local serve (API + built UI on one port):
-
-```bash
-npm run build
-npm start
-```
-
-## Tests
-
-```bash
+npm run seed    # imports gospel xlsx from Project store when present
+npm run dev     # API :4173 + UI :5173
 npm test
 ```
 
-## What is live vs synthetic
+Single port: `npm run build && npm start`
+
+## Gospel workbook
+
+Default seed path:
+
+`/cursor/stores/self/internal/Permit_Tracker_9.1.2026.xlsx`
+
+Imports: Permit Tracker (24 section headers), Permit Revisions, Masterfile Plan Tracker, MST reference IDs.  
+Ignores: Indirect Cost, 2018 IRC, Corewall, WHSD (this milestone).
+
+## Live vs synthetic
 
 | Jurisdiction | Mode |
 |--------------|------|
-| Fairfax County, VA | **Live** read-only ArcGIS FeatureServer query |
-| City of Fairfax, VA | Synthetic (portal exists; API not verified) |
-| City of Houston, TX | Synthetic |
-| Harris County, TX | Synthetic |
+| Fairfax County | **Live** Building Records PLUS FeatureServer |
+| Loudoun, PWC, City of Fairfax, Houston, Harris | **Synthetic** (labeled) |
 
-Never treat synthetic connector results as live AHJ data.
+Fairfax layer: status + milestone dates + links are live; pending/comments/holds/inspections are **unavailable**.
 
-## Safety rules baked in
+## Safety
 
-- Official vs internal status are separate
-- Source-native status stored alongside normalized status
-- Connectors/imports do not clear blank-overwritten notes/milestones
-- Match on jurisdiction + official ID
-- Check outcomes: `updated` / `no_change` / `not_found` / `unavailable` / `failed`
-- Predicted issue dates are labeled non-official
-
-## Data
-
-SQLite file: `data/permit-tracker.sqlite` (gitignored). Demo seed only — no employer records.
+- Internal milestones never cleared by blank import/sync cells  
+- Connectors write `official_*` fields only  
+- Check outcomes: `updated` / `no_change` / `not_found` / `unavailable` / `failed`  
+- Never present synthetic as live  

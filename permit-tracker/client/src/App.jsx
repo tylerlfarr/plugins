@@ -2,10 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 
 async function api(path, options) {
   const res = await fetch(path, options);
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(text || res.statusText);
-  }
+  if (!res.ok) throw new Error((await res.text()) || res.statusText);
   const ct = res.headers.get('content-type') || '';
   if (ct.includes('application/json')) return res.json();
   return res;
@@ -18,15 +15,10 @@ const TABS = [
   { id: 'connectors', label: 'Connectors' },
 ];
 
-function modePill(connectors, code) {
-  const c = connectors.find((x) => x.code === code);
-  if (!c) return <span className="pill">unknown</span>;
-  return <span className={`pill ${c.mode}`}>{c.mode}</span>;
-}
-
 export default function App() {
   const [tab, setTab] = useState('permits');
-  const [meta, setMeta] = useState({ connectors: [], staleDays: 14, user: 'demo.user' });
+  const [meta, setMeta] = useState({ connectors: [], staleDays: 14, fairfaxFieldAvailability: {} });
+  const [stats, setStats] = useState(null);
   const [permits, setPermits] = useState([]);
   const [q, setQ] = useState('');
   const [filters, setFilters] = useState({});
@@ -34,56 +26,52 @@ export default function App() {
   const [sort, setSort] = useState({ key: 'updated_at', dir: 'desc' });
   const [selected, setSelected] = useState(new Set());
   const [detail, setDetail] = useState(null);
+  const [milestones, setMilestones] = useState([]);
+  const [officialIds, setOfficialIds] = useState([]);
   const [history, setHistory] = useState([]);
   const [attention, setAttention] = useState([]);
   const [bulk, setBulk] = useState({ internal_status: '', owner: '' });
   const [message, setMessage] = useState('');
-  const [importState, setImportState] = useState(null);
+  const [importPreview, setImportPreview] = useState(null);
   const [busy, setBusy] = useState(false);
 
   const connectors = meta.connectors || [];
 
-  async function loadMeta() {
-    setMeta(await api('/api/meta'));
-  }
-
-  async function loadPermits(next = {}) {
-    const params = new URLSearchParams();
-    const merged = { q, ...filters, sort: sort.key, dir: sort.dir, ...next };
-    Object.entries(merged).forEach(([k, v]) => {
-      if (v != null && v !== '') params.set(k, v);
-    });
-    const data = await api(`/api/permits?${params}`);
-    setPermits(data.permits);
-  }
-
-  async function loadSavedFilters() {
-    const data = await api('/api/filters');
-    setSavedFilters(data.filters);
-  }
-
-  async function loadAttention() {
-    const data = await api('/api/attention');
-    setAttention(data.items);
+  async function refreshLists() {
+    const params = new URLSearchParams({ q, sort: sort.key, dir: sort.dir, ...filters });
+    Object.keys([...params.keys()]).forEach(() => {});
+    // drop empties
+    for (const [k, v] of [...params.entries()]) if (!v) params.delete(k);
+    const [p, s, f] = await Promise.all([
+      api(`/api/permits?${params}`),
+      api('/api/stats'),
+      api('/api/filters'),
+    ]);
+    setPermits(p.permits);
+    setStats(s);
+    setSavedFilters(f.filters);
   }
 
   async function openDetail(id) {
     const data = await api(`/api/permits/${id}`);
     setDetail(data.permit);
+    setMilestones(data.milestones);
+    setOfficialIds(data.officialIds);
     setHistory(data.history);
   }
 
   useEffect(() => {
-    loadMeta();
-    loadSavedFilters();
+    api('/api/meta').then(setMeta);
   }, []);
 
   useEffect(() => {
-    loadPermits();
+    refreshLists().catch((e) => setMessage(String(e.message || e)));
   }, [q, filters, sort]);
 
   useEffect(() => {
-    if (tab === 'attention') loadAttention();
+    if (tab === 'attention') {
+      api('/api/attention').then((d) => setAttention(d.items));
+    }
   }, [tab]);
 
   const selectedIds = useMemo(() => [...selected], [selected]);
@@ -94,26 +82,16 @@ export default function App() {
     );
   }
 
-  function toggleSelect(id) {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  }
-
-  async function saveDetail(patch) {
+  async function saveDetail() {
     setBusy(true);
     try {
-      const data = await api(`/api/permits/${detail.id}`, {
+      await api(`/api/permits/${detail.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(patch),
+        body: JSON.stringify(detail),
       });
-      setDetail(data.permit);
       setMessage('Saved.');
-      await loadPermits();
+      await refreshLists();
       await openDetail(detail.id);
     } finally {
       setBusy(false);
@@ -128,24 +106,27 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ forceFail }),
       });
-      setMessage(
-        `Check outcome: ${data.result.outcome}${data.result.mode ? ` (${data.result.mode})` : ''}`
-      );
-      await loadPermits();
+      setMessage(`Check: ${data.result.outcome}${data.result.mode ? ` (${data.result.mode})` : ''}`);
+      await refreshLists();
       if (detail?.id === id) await openDetail(id);
-      if (tab === 'attention') await loadAttention();
     } finally {
       setBusy(false);
     }
   }
 
-  async function syncAll() {
+  async function syncFairfaxShaped() {
     setBusy(true);
     try {
-      const data = await api('/api/sync', { method: 'POST' });
-      setMessage(`Synced ${data.results.length} linked permits.`);
-      await loadPermits();
-      await loadAttention();
+      const data = await api('/api/sync', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ fairfaxOnly: true }),
+      });
+      setMessage(`Fairfax-shaped sync finished: ${data.results.length} checks.`);
+      await refreshLists();
+      if (tab === 'attention') {
+        setAttention((await api('/api/attention')).items);
+      }
     } finally {
       setBusy(false);
     }
@@ -162,51 +143,42 @@ export default function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids: selectedIds, patch }),
     });
-    setMessage(`Bulk updated ${selectedIds.length} rows.`);
     setSelected(new Set());
-    await loadPermits();
+    setMessage(`Bulk updated ${selectedIds.length}.`);
+    await refreshLists();
   }
 
-  async function saveFilter() {
-    const name = window.prompt('Saved filter name');
-    if (!name) return;
-    await api('/api/filters', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name, definition: { ...filters, q } }),
-    });
-    await loadSavedFilters();
+  async function importStoreGospel() {
+    setBusy(true);
+    try {
+      const data = await api('/api/import/gospel/store', { method: 'POST' });
+      setMessage(
+        `Gospel import: ${data.summary.permits_created} created, ${data.summary.permits_updated} updated, ${data.summary.sections} sections, ${data.summary.official_ids} IDs.`
+      );
+      await refreshLists();
+    } catch (e) {
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
   }
 
-  async function onImportFile(file) {
+  async function previewFile(file) {
     const fd = new FormData();
     fd.append('file', file);
-    const data = await api('/api/import/preview', { method: 'POST', body: fd });
-    setImportState(data);
+    const data = await api('/api/import/gospel/preview', { method: 'POST', body: fd });
+    setImportPreview(data);
     setTab('import');
   }
 
-  async function remapImport(nextMapping) {
-    if (!importState) return;
-    // Re-upload not stored; ask user to keep mapping edits client-side by re-validating via commit only.
-    setImportState({ ...importState, mapping: nextMapping });
-  }
-
-  async function commitImport() {
-    if (!importState) return;
+  async function commitFile(file) {
+    const fd = new FormData();
+    fd.append('file', file);
     setBusy(true);
     try {
-      // Re-preview with current mapping by asking user to reselect if needed — mapping already applied server-side on first preview.
-      // For mapping edits, re-run preview requires file; keep commit on original preview rows for prototype.
-      const result = await api('/api/import/commit', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ preview: importState.preview }),
-      });
-      setMessage(
-        `Import: ${result.created} created, ${result.updated} updated, ${result.skipped} skipped.`
-      );
-      await loadPermits();
+      const data = await api('/api/import/gospel/commit', { method: 'POST', body: fd });
+      setMessage(`Committed: ${JSON.stringify(data.summary)}`);
+      await refreshLists();
     } finally {
       setBusy(false);
     }
@@ -218,17 +190,22 @@ export default function App() {
         <div className="brand">
           <h1>Permit Ledger</h1>
           <p>
-            Builder inventory for communities, lots, and multi-permit tracking. Official AHJ status
-            stays separate from internal workflow.
+            Workbook-native checks for communities/lots — preserve the spreadsheet workflow, show
+            what changed before the morning meeting.
           </p>
         </div>
-        <nav className="nav">
+        <nav className="nav" role="tablist">
           {TABS.map((t) => (
             <button
               key={t.id}
-              className={tab === t.id ? 'active' : ''}
-              onClick={() => setTab(t.id)}
               type="button"
+              role="tab"
+              aria-selected={tab === t.id}
+              className={tab === t.id ? 'active' : ''}
+              onClick={() => {
+                setTab(t.id);
+                setMessage('');
+              }}
             >
               {t.label}
             </button>
@@ -237,11 +214,16 @@ export default function App() {
       </header>
 
       <div className="banner warn">
-        Prototype uses synthetic demo communities. Fairfax County checks are live public GIS reads;
-        Houston, Harris County, and City of Fairfax connectors are labeled synthetic. Employer
-        workbook was not available in this environment.
+        Fairfax County = live GIS reads (issued-heavy; no pending/comments/holds/inspections).
+        Loudoun + Prince William + Houston/Harris = labeled synthetic. Gospel workbook import is
+        section-aware.
       </div>
-
+      {stats ? (
+        <div className="banner">
+          {stats.sections} sections · {stats.lotGroups} lot groups · {stats.permits} permits ·{' '}
+          {stats.withIds} with IDs · {stats.officialIds} extracted IDs · {stats.attention} attention
+        </div>
+      ) : null}
       {message ? <div className="banner">{message}</div> : null}
 
       {tab === 'permits' && (
@@ -249,7 +231,7 @@ export default function App() {
           <div className="toolbar">
             <input
               type="search"
-              placeholder="Search community, lot, ID, notes, owner…"
+              placeholder="Search community, lot, housetype, ID, notes…"
               value={q}
               onChange={(e) => setQ(e.target.value)}
             />
@@ -269,36 +251,50 @@ export default function App() {
               onChange={(e) => setFilters((f) => ({ ...f, internal_status: e.target.value }))}
             >
               <option value="">Internal status</option>
-              <option value="draft">draft</option>
               <option value="watching">watching</option>
               <option value="needs_followup">needs_followup</option>
               <option value="done">done</option>
             </select>
+            <label className="muted">
+              <input
+                type="checkbox"
+                checked={filters.has_official_id === 'true'}
+                onChange={(e) =>
+                  setFilters((f) => ({
+                    ...f,
+                    has_official_id: e.target.checked ? 'true' : '',
+                  }))
+                }
+              />{' '}
+              Has official ID
+            </label>
+            <label className="muted">
+              <input
+                type="checkbox"
+                checked={filters.fairfax_shaped === 'true'}
+                onChange={(e) =>
+                  setFilters((f) => ({
+                    ...f,
+                    fairfax_shaped: e.target.checked ? 'true' : '',
+                  }))
+                }
+              />{' '}
+              Fairfax-shaped
+            </label>
             <select
-              value={filters.official_status || ''}
-              onChange={(e) => setFilters((f) => ({ ...f, official_status: e.target.value }))}
-            >
-              <option value="">Official status</option>
-              <option value="unknown">unknown</option>
-              <option value="in_review">in_review</option>
-              <option value="approved">approved</option>
-              <option value="issued">issued</option>
-              <option value="revision_required">revision_required</option>
-              <option value="closed">closed</option>
-            </select>
-            <button type="button" className="btn" onClick={saveFilter}>
-              Save filter
-            </button>
-            <select
+              defaultValue=""
               onChange={(e) => {
                 const sf = savedFilters.find((x) => String(x.id) === e.target.value);
                 if (!sf) return;
                 const def = JSON.parse(sf.definition);
                 setQ(def.q || '');
-                const { q: _q, attention: _a, ...rest } = def;
-                setFilters(rest);
+                const { q: _q, ...rest } = def;
+                setFilters(
+                  Object.fromEntries(
+                    Object.entries(rest).map(([k, v]) => [k, v === true ? 'true' : v || ''])
+                  )
+                );
               }}
-              defaultValue=""
             >
               <option value="">Saved filters…</option>
               {savedFilters.map((f) => (
@@ -308,13 +304,10 @@ export default function App() {
               ))}
             </select>
             <a className="btn" href="/api/export.xlsx">
-              Export Excel
+              Export coexistence Excel
             </a>
-            <a className="btn" href="/api/sample-import.xlsx">
-              Sample import
-            </a>
-            <button type="button" className="btn primary" disabled={busy} onClick={syncAll}>
-              Check linked sources
+            <button type="button" className="btn primary" disabled={busy} onClick={syncFairfaxShaped}>
+              Sync Fairfax-shaped IDs
             </button>
           </div>
 
@@ -338,15 +331,6 @@ export default function App() {
             <button type="button" className="btn" onClick={applyBulk}>
               Apply bulk
             </button>
-            <label className="btn ghost">
-              Import Excel
-              <input
-                type="file"
-                accept=".xlsx,.xls,.csv"
-                hidden
-                onChange={(e) => e.target.files?.[0] && onImportFile(e.target.files[0])}
-              />
-            </label>
           </div>
 
           <div className="layout">
@@ -356,12 +340,10 @@ export default function App() {
                   <tr>
                     <th></th>
                     <th onClick={() => toggleSort('community_name')}>Community / Lot</th>
-                    <th>Official ID</th>
+                    <th onClick={() => toggleSort('primary_official_id')}>Official IDs</th>
                     <th onClick={() => toggleSort('official_status')}>Official</th>
                     <th onClick={() => toggleSort('internal_status')}>Internal</th>
-                    <th onClick={() => toggleSort('owner')}>Owner</th>
-                    <th onClick={() => toggleSort('next_action_due')}>Next action</th>
-                    <th>Source</th>
+                    <th>Check</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -375,33 +357,42 @@ export default function App() {
                         <input
                           type="checkbox"
                           checked={selected.has(p.id)}
-                          onChange={() => toggleSelect(p.id)}
+                          onChange={() =>
+                            setSelected((prev) => {
+                              const n = new Set(prev);
+                              if (n.has(p.id)) n.delete(p.id);
+                              else n.add(p.id);
+                              return n;
+                            })
+                          }
                         />
                       </td>
                       <td>
-                        <strong>{p.community_name}</strong>
+                        <strong>
+                          {p.project_code} · {p.community_name}
+                        </strong>
                         <div className="muted">
-                          {p.project_name} · Lot {p.lot_number}
+                          Lot {p.lot_label}
+                          {p.housetype ? ` · ${p.housetype}` : ''}
                         </div>
-                        <div className="muted">{p.address}</div>
                       </td>
                       <td>
-                        <div className="mono">{p.official_id || '—'}</div>
-                        <div className="muted">{p.permit_type}</div>
+                        <div className="mono">{p.primary_official_id || '—'}</div>
+                        <span className={`pill ${p.fairfax_shaped ? 'live' : 'synthetic'}`}>
+                          {p.jurisdiction_code}
+                        </span>
                       </td>
                       <td>
                         <div>{p.official_status}</div>
                         <div className="muted mono">{p.source_native_status || '—'}</div>
                       </td>
-                      <td>{p.internal_status}</td>
-                      <td>{p.owner || '—'}</td>
                       <td>
-                        <div>{p.next_action || '—'}</div>
-                        <div className="muted">{p.next_action_due || ''}</div>
+                        <div>{p.internal_status}</div>
+                        <div className="muted">{p.owner}</div>
                       </td>
                       <td>
-                        {modePill(connectors, p.jurisdiction_code)}
-                        <div className="muted">{p.last_check_outcome}</div>
+                        <div>{p.last_check_outcome}</div>
+                        <div className="muted">{p.last_successful_check_at || ''}</div>
                       </td>
                     </tr>
                   ))}
@@ -412,23 +403,16 @@ export default function App() {
             <aside className="panel stack">
               <h2>Permit detail</h2>
               {!detail ? (
-                <p className="muted">Select a row to edit milestones, notes, and run a source check.</p>
+                <p className="muted">Select a row.</p>
               ) : (
                 <>
                   <div className="fields">
                     {[
-                      ['official_id', 'Official ID'],
-                      ['permit_type', 'Permit type'],
+                      ['primary_official_id', 'Primary official ID'],
+                      ['jurisdiction_code', 'Jurisdiction'],
                       ['source_native_status', 'Source-native status'],
                       ['official_status', 'Official status'],
                       ['internal_status', 'Internal status'],
-                      ['submitted_date', 'Submitted', 'date'],
-                      ['approved_date', 'Approved', 'date'],
-                      ['issued_date', 'Issued', 'date'],
-                      ['revision_date', 'Revision', 'date'],
-                      ['construction_start_date', 'Construction start', 'date'],
-                      ['expiration_date', 'Expiration', 'date'],
-                      ['predicted_issue_date', 'Predicted issue (non-official)', 'date'],
                       ['owner', 'Owner'],
                       ['next_action', 'Next action'],
                       ['next_action_due', 'Next action due', 'date'],
@@ -445,63 +429,57 @@ export default function App() {
                       </div>
                     ))}
                     <div className="field full">
-                      <label htmlFor="notes">Notes (never overwritten by connectors)</label>
-                      <textarea
-                        id="notes"
-                        rows={3}
-                        value={detail.notes ?? ''}
-                        onChange={(e) => setDetail({ ...detail, notes: e.target.value })}
-                      />
+                      <label>Notes (from workbook col S — preserved)</label>
+                      <textarea rows={3} readOnly value={detail.notes_raw || ''} />
                     </div>
                   </div>
+                  <h3>Official IDs extracted</h3>
+                  <ul className="history">
+                    {officialIds.map((o) => (
+                      <li key={o.id}>
+                        <span className="mono">{o.official_id}</span> · {o.jurisdiction_guess}{' '}
+                        {o.is_primary ? '(primary)' : ''}
+                      </li>
+                    ))}
+                  </ul>
+                  <h3>Internal milestones</h3>
+                  <ul className="history">
+                    {milestones.map((m) => (
+                      <li key={m.id}>
+                        <strong>{m.label}</strong>
+                        <div className="mono">
+                          {m.value}{' '}
+                          <span className="muted">
+                            [{m.value_kind}] {m.key.startsWith('official_') ? '· connector' : '· internal'}
+                          </span>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
                   <div className="toolbar">
-                    <button
-                      type="button"
-                      className="btn primary"
-                      disabled={busy}
-                      onClick={() => saveDetail(detail)}
-                    >
+                    <button type="button" className="btn primary" disabled={busy} onClick={saveDetail}>
                       Save
                     </button>
                     <button
                       type="button"
                       className="btn"
-                      disabled={busy || !detail.official_id}
+                      disabled={busy || !detail.primary_official_id}
                       onClick={() => runSync(detail.id)}
                     >
                       Check source
                     </button>
-                    <button
-                      type="button"
-                      className="btn"
-                      disabled={busy}
-                      onClick={() => runSync(detail.id, true)}
-                    >
+                    <button type="button" className="btn" disabled={busy} onClick={() => runSync(detail.id, true)}>
                       Simulate failure
                     </button>
-                  </div>
-                  <div className="muted">
-                    Last successful check: {detail.last_successful_check_at || '—'} · Outcome:{' '}
-                    {detail.last_check_outcome}
-                    {detail.last_check_error ? ` · ${detail.last_check_error}` : ''}
-                    {detail.source_url ? (
-                      <>
-                        {' '}
-                        · <a href={detail.source_url} target="_blank" rel="noreferrer">Open source</a>
-                      </>
-                    ) : null}
                   </div>
                   <h3>Change history</h3>
                   <ul className="history">
                     {history.map((h) => (
                       <li key={h.id}>
-                        <div>
-                          <strong>{h.field}</strong> · {h.changed_by} · {h.source}
-                        </div>
+                        <strong>{h.field}</strong> · {h.changed_by} · {h.source}
                         <div className="muted mono">
                           {h.old_value || '∅'} → {h.new_value || '∅'}
                         </div>
-                        <div className="muted">{h.created_at}</div>
                       </li>
                     ))}
                   </ul>
@@ -514,47 +492,24 @@ export default function App() {
 
       {tab === 'attention' && (
         <div className="panel stack">
-          <h2>Attention</h2>
-          <p className="muted">
-            Status changes, overdue actions, upcoming expirations, source errors, and no movement
-            beyond {meta.staleDays} days.
-          </p>
-          <div className="toolbar">
-            <label>
-              Stale days{' '}
-              <input
-                type="number"
-                min={1}
-                value={meta.staleDays}
-                onChange={async (e) => {
-                  const staleDays = Number(e.target.value);
-                  setMeta((m) => ({ ...m, staleDays }));
-                  await api('/api/settings', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ staleDays }),
-                  });
-                  await loadAttention();
-                }}
-              />
-            </label>
-          </div>
+          <h2>Attention — morning meeting</h2>
+          <p className="muted">Status changes, stalled synced permits, failed/unavailable checks, overdue actions.</p>
           {attention.length === 0 ? (
-            <p>No open attention items.</p>
+            <p>No open items.</p>
           ) : (
             attention.map((a) => (
               <div key={a.id} className={`attention-item ${a.kind}`}>
                 <div>
-                  <strong>{a.kind}</strong> · {a.community_name} / Lot {a.lot_number}
+                  <strong>{a.kind}</strong> · {a.community_name} / {a.lot_label}
                 </div>
                 <div>{a.message}</div>
-                <div className="muted mono">{a.official_id || 'no official id'}</div>
+                <div className="muted mono">{a.primary_official_id || '—'}</div>
                 <button
                   type="button"
                   className="btn"
                   onClick={async () => {
                     await api(`/api/attention/${a.id}/ack`, { method: 'POST' });
-                    await loadAttention();
+                    setAttention((await api('/api/attention')).items);
                   }}
                 >
                   Acknowledge
@@ -567,116 +522,98 @@ export default function App() {
 
       {tab === 'import' && (
         <div className="panel stack">
-          <h2>Excel import</h2>
+          <h2>Gospel workbook import</h2>
           <p className="muted">
-            Preview mapping, validation, and duplicate handling. Blank cells do not clear existing
-            notes or milestones.
+            Section-aware Permit Tracker import (24 repeating header blocks), plus Permit Revisions,
+            Masterfile Plan Tracker, and MST reference IDs. Indirect Cost / 2018 IRC / Corewall /
+            WHSD ignored for this milestone.
           </p>
-          <label className="btn primary">
-            Choose workbook
-            <input
-              type="file"
-              accept=".xlsx,.xls,.csv"
-              hidden
-              onChange={(e) => e.target.files?.[0] && onImportFile(e.target.files[0])}
-            />
-          </label>
-          {!importState ? (
-            <p className="muted">
-              Or download the <a href="/api/sample-import.xlsx">sample import workbook</a>.
-            </p>
-          ) : (
+          <div className="toolbar">
+            <button type="button" className="btn primary" disabled={busy} onClick={importStoreGospel}>
+              Import store gospel xlsx
+            </button>
+            <label className="btn">
+              Preview upload
+              <input
+                type="file"
+                accept=".xlsx"
+                hidden
+                onChange={(e) => e.target.files?.[0] && previewFile(e.target.files[0])}
+              />
+            </label>
+            <label className="btn">
+              Commit upload
+              <input
+                type="file"
+                accept=".xlsx"
+                hidden
+                onChange={(e) => e.target.files?.[0] && commitFile(e.target.files[0])}
+              />
+            </label>
+          </div>
+          {importPreview ? (
             <>
               <div>
-                File: <strong>{importState.sessionId}</strong> · Sheet {importState.sheetName} ·{' '}
-                {importState.summary.rows} rows · {importState.summary.ok} ok ·{' '}
-                {importState.summary.updates} updates · {importState.summary.creates} creates
+                {importPreview.sectionCount} sections · {importPreview.rowCount} lot rows ·{' '}
+                {importPreview.revisions} revisions · {importPreview.masterfile} masterfile ·{' '}
+                {importPreview.mstIds} MST IDs
               </div>
-              <h3>Field mapping</h3>
-              <div className="import-grid">
-                {(importState.targetFields || []).map((f) => (
-                  <div className="field" key={f.key}>
-                    <label>
-                      {f.label}
-                      {f.required ? ' *' : ''}
-                    </label>
-                    <select
-                      value={importState.mapping[f.key] || ''}
-                      onChange={(e) =>
-                        remapImport({ ...importState.mapping, [f.key]: e.target.value })
-                      }
-                    >
-                      <option value="">—</option>
-                      {importState.headers.map((h) => (
-                        <option key={h} value={h}>
-                          {h}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                ))}
-              </div>
-              <p className="muted">
-                Mapping edits in this prototype apply on the next file re-upload; commit uses the
-                validated preview from the last upload.
-              </p>
-              <button type="button" className="btn primary" disabled={busy} onClick={commitImport}>
-                Commit import
-              </button>
               <div className="table-wrap">
                 <table>
                   <thead>
                     <tr>
-                      <th>Row</th>
-                      <th>Match</th>
-                      <th>Official ID</th>
-                      <th>Errors</th>
-                      <th>Warnings</th>
+                      <th>Project</th>
+                      <th>Community</th>
+                      <th>Jurisdiction</th>
+                      <th>Header row</th>
+                      <th>Cols</th>
                     </tr>
                   </thead>
                   <tbody>
-                    {importState.preview.map((p) => (
-                      <tr key={p.rowNumber}>
-                        <td>{p.rowNumber}</td>
-                        <td>{p.match}</td>
-                        <td className="mono">{p.mapped.official_id || '—'}</td>
-                        <td className={p.errors.length ? 'pill danger' : ''}>
-                          {p.errors.join('; ') || '—'}
-                        </td>
-                        <td>{p.warnings.join('; ') || '—'}</td>
+                    {importPreview.sections.map((s) => (
+                      <tr key={`${s.project_code}-${s.headerRow}`}>
+                        <td className="mono">{s.project_code}</td>
+                        <td>{s.community_name}</td>
+                        <td>{s.jurisdiction_code}</td>
+                        <td>{s.headerRow}</td>
+                        <td>{s.headerCount}</td>
                       </tr>
                     ))}
                   </tbody>
                 </table>
               </div>
             </>
+          ) : (
+            <p className="muted">Upload a workbook to preview sections, or import the store gospel.</p>
           )}
         </div>
       )}
 
       {tab === 'connectors' && (
         <div className="panel stack">
-          <h2>Connectors</h2>
-          <p className="muted">
-            Reusable interface: each jurisdiction adapter returns outcome codes and never writes
-            internal notes. Live adapters only when access is verified.
-          </p>
+          <h2>Connectors & Fairfax field availability</h2>
           {connectors.map((c) => (
             <div key={c.code} className="attention-item">
               <div>
-                <strong>{c.label}</strong> {modePill(connectors, c.code)}
+                <strong>{c.label}</strong>{' '}
+                <span className={`pill ${c.mode}`}>{c.mode}</span>
               </div>
               <div className="mono">{c.code}</div>
               <div>{c.notes}</div>
             </div>
           ))}
+          <h3>Fairfax Building Records PLUS fields</h3>
+          <ul className="history">
+            {Object.entries(meta.fairfaxFieldAvailability || {}).map(([k, v]) => (
+              <li key={k}>
+                <span className="mono">{k}</span> · <span className={`pill ${v === 'live' ? 'live' : 'warn'}`}>{v}</span>
+              </li>
+            ))}
+          </ul>
         </div>
       )}
 
-      <p className="footer-note">
-        Local prototype · user {meta.user} · not production-ready · predicted dates are labeled
-        non-official
-      </p>
+      <p className="footer-note">Workbook-native prototype · not production-ready · never present synthetic as live</p>
     </div>
   );
 }

@@ -11,8 +11,9 @@
     "build": "vite build --config client/vite.config.js",
     "start": "NODE_ENV=production node server/index.js",
     "seed": "node server/seed.js",
-    "test": "node --test --test-concurrency=1 server/tests/*.test.js",
-    "demo:import": "node server/scripts/demo-import.js"
+    "test": "node --test --test-concurrency=1 ./server/tests/gospel.test.js",
+    "import:gospel": "node server/seed.js",
+    "demo:import": "node server/seed.js"
   },
   "dependencies": {
     "better-sqlite3": "^11.9.1",

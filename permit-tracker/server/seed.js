@@ -1,260 +1,124 @@
 import { pathToFileURL } from 'node:url';
+import fs from 'node:fs';
 import { db, migrate, setSetting } from './db.js';
 import { rebuildAttention } from './sync.js';
+import { importGospelFile } from './gospelImport.js';
 
 migrate();
+
+const GOSPEL_CANDIDATES = [
+  process.env.GOSPEL_XLSX,
+  '/cursor/stores/self/internal/Permit_Tracker_9.1.2026.xlsx',
+  '/cursor/stores/bc-01a10831-bc67-7d55-83fd-6645d7e3c6b1/internal/Permit_Tracker_9.1.2026.xlsx',
+].filter(Boolean);
 
 function reset() {
   db.exec(`
     DELETE FROM attention_events;
     DELETE FROM match_reviews;
-    DELETE FROM change_history;
-    DELETE FROM import_sessions;
+    DELETE FROM field_changes;
+    DELETE FROM official_snapshots;
+    DELETE FROM official_ids;
+    DELETE FROM internal_milestones;
+    DELETE FROM permit_records;
+    DELETE FROM lot_groups;
+    DELETE FROM community_sections;
+    DELETE FROM permit_revisions;
+    DELETE FROM plan_tracker_rows;
+    DELETE FROM mst_reference_ids;
     DELETE FROM saved_filters;
-    DELETE FROM permits;
-    DELETE FROM lots;
-    DELETE FROM projects;
-    DELETE FROM communities;
+    DELETE FROM import_runs;
   `);
 }
 
-export function seed() {
+function ensureFairfaxProbe() {
+  let section = db
+    .prepare(
+      `SELECT id FROM community_sections WHERE project_code = 'FFX-DEMO' AND community_name = 'Fairfax Live Probe'`
+    )
+    .get();
+  if (!section) {
+    const info = db
+      .prepare(
+        `INSERT INTO community_sections(project_code, community_name, jurisdiction_code, permit_time_note, header_json)
+         VALUES ('FFX-DEMO', 'Fairfax Live Probe', 'fairfax_county', 'demo overlay — not from gospel rows', '[]')`
+      )
+      .run();
+    section = { id: Number(info.lastInsertRowid) };
+  }
+  let lot = db
+    .prepare(`SELECT id FROM lot_groups WHERE section_id = ? AND lot_label = 'PROBE' AND housetype = 'Live connector probe'`)
+    .get(section.id);
+  if (!lot) {
+    const info = db
+      .prepare(
+        `INSERT INTO lot_groups(section_id, lot_label, housetype, notes_raw)
+         VALUES (?, 'PROBE', 'Live connector probe', 'ALTC-2026-00970 (public Fairfax RECORDID for connector tests)')`
+      )
+      .run(section.id);
+    lot = { id: Number(info.lastInsertRowid) };
+  }
+  let permit = db
+    .prepare(
+      `SELECT id FROM permit_records WHERE lot_group_id = ? AND primary_official_id = 'ALTC-2026-00970'`
+    )
+    .get(lot.id);
+  if (!permit) {
+    const info = db
+      .prepare(
+        `INSERT INTO permit_records(lot_group_id, primary_official_id, jurisdiction_code, internal_status, owner, next_action, next_action_due)
+         VALUES (?, 'ALTC-2026-00970', 'fairfax_county', 'watching', 'demo.user', 'Morning check', '2026-10-01')`
+      )
+      .run(lot.id);
+    permit = { id: Number(info.lastInsertRowid) };
+    db.prepare(
+      `INSERT INTO official_ids(permit_record_id, official_id, id_prefix, jurisdiction_guess, is_primary)
+       VALUES (?, 'ALTC-2026-00970', 'ALTC', 'fairfax_county', 1)`
+    ).run(permit.id);
+    db.prepare(
+      `INSERT INTO internal_milestones(permit_record_id, key, label, value, value_kind)
+       VALUES (?, 'internal_note_probe', 'Internal probe note', 'Must survive Fairfax sync', 'text')`
+    ).run(permit.id);
+  }
+}
+
+export function seed({ preferGospel = true } = {}) {
   reset();
   setSetting('stale_days', '14');
   setSetting('current_user', 'demo.user');
 
-  const insertCommunity = db.prepare(
-    'INSERT INTO communities(name, jurisdiction_code, notes) VALUES (?, ?, ?)'
-  );
-  const insertProject = db.prepare(
-    'INSERT INTO projects(community_id, name, code) VALUES (?, ?, ?)'
-  );
-  const insertLot = db.prepare(
-    'INSERT INTO lots(project_id, lot_number, address, parcel_id) VALUES (?, ?, ?, ?)'
-  );
-  const insertPermit = db.prepare(
-    `INSERT INTO permits(
-      lot_id, jurisdiction_code, official_id, permit_type, source_native_status, official_status,
-      internal_status, submitted_date, approved_date, issued_date, revision_date,
-      construction_start_date, expiration_date, predicted_issue_date, owner, notes,
-      next_action, next_action_due, source_url, last_check_outcome, official_last_changed_at
-    ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`
-  );
+  let usedGospel = null;
+  if (preferGospel) {
+    for (const p of GOSPEL_CANDIDATES) {
+      if (p && fs.existsSync(p)) {
+        usedGospel = p;
+        break;
+      }
+    }
+  }
 
-  const oak = insertCommunity.run(
-    'Oakridge Estates',
-    'fairfax_county',
-    'Synthetic community for Fairfax County demo'
-  );
-  const bayou = insertCommunity.run(
-    'Bayou Bend',
-    'city_of_houston',
-    'Synthetic Houston community — connector is synthetic'
-  );
-  const prairie = insertCommunity.run(
-    'Prairie Ridge',
-    'harris_county',
-    'Harris County (not City of Houston)'
-  );
-  const cityFx = insertCommunity.run(
-    'Fairfax City Mews',
-    'city_of_fairfax',
-    'City of Fairfax — distinct from Fairfax County'
-  );
+  if (usedGospel) {
+    const { summary } = importGospelFile(usedGospel, usedGospel.split('/').pop());
+    ensureFairfaxProbe();
+    db.prepare(
+      `INSERT INTO saved_filters(name, definition) VALUES
+       ('Needs follow-up', ?),
+       ('Has official ID', ?),
+       ('Fairfax-shaped IDs', ?)`
+    ).run(
+      JSON.stringify({ internal_status: 'needs_followup' }),
+      JSON.stringify({ has_official_id: true }),
+      JSON.stringify({ fairfax_shaped: true })
+    );
+    rebuildAttention();
+    console.log('Seeded from gospel:', usedGospel, summary);
+    return { mode: 'gospel', path: usedGospel, summary };
+  }
 
-  const oakP2 = insertProject.run(oak.lastInsertRowid, 'Phase 2', 'OR-P2');
-  const bayouA = insertProject.run(bayou.lastInsertRowid, 'Section A', 'BB-A');
-  const prairie1 = insertProject.run(prairie.lastInsertRowid, 'Pod 1', 'PR-1');
-  const mews = insertProject.run(cityFx.lastInsertRowid, 'Townhomes', 'FCM-TH');
-
-  const lot12 = insertLot.run(oakP2.lastInsertRowid, '12', '100 Demo Oak Ln', '0294 10 DEMO');
-  const lot13 = insertLot.run(oakP2.lastInsertRowid, '13', '102 Demo Oak Ln', '0294 11 DEMO');
-  const lot3 = insertLot.run(bayouA.lastInsertRowid, '3', '220 Synthetic Bayou Rd', '');
-  const lot7 = insertLot.run(prairie1.lastInsertRowid, '7', '15 County Line Dr', '');
-  const lot1 = insertLot.run(mews.lastInsertRowid, '1', '40 City Center Way', '');
-
-  // Live Fairfax ID (public record) — used only as demo link target
-  insertPermit.run(
-    lot12.lastInsertRowid,
-    'fairfax_county',
-    'ALTC-2026-00970',
-    'Commercial Addition/Alteration',
-    '',
-    'unknown',
-    'watching',
-    '2026-03-18',
-    null,
-    null,
-    null,
-    null,
-    null,
-    null,
-    'Alex PM',
-    'Demo: sync via Fairfax live connector. Internal note must survive sync.',
-    'Run source check',
-    '2026-10-05',
-    '',
-    'never',
-    null
-  );
-
-  insertPermit.run(
-    lot12.lastInsertRowid,
-    'fairfax_county',
-    'FFX-TRADE-DEMO-12',
-    'Electrical',
-    'In Review',
-    'in_review',
-    'needs_followup',
-    '2026-09-15',
-    null,
-    null,
-    null,
-    null,
-    null,
-    '2026-10-20',
-    'Alex PM',
-    'Second permit on same lot. Official ID is synthetic (will not_found on live check).',
-    'Call electrician',
-    '2026-09-20',
-    '',
-    'never',
-    '2026-09-16'
-  );
-
-  insertPermit.run(
-    lot13.lastInsertRowid,
-    'fairfax_county',
-    null,
-    'Building',
-    '',
-    'unknown',
-    'draft',
-    null,
-    null,
-    null,
-    null,
-    null,
-    null,
-    null,
-    'Sam Coordinator',
-    'No official ID yet — import/manual entry.',
-    'Obtain record number',
-    '2026-10-12',
-    '',
-    'never',
-    null
-  );
-
-  insertPermit.run(
-    lot3.lastInsertRowid,
-    'city_of_houston',
-    'HOU-DEMO-55001',
-    'Residential New Construction',
-    'Sold / Issued',
-    'issued',
-    'watching',
-    '2026-03-10',
-    '2026-04-02',
-    '2026-04-05',
-    null,
-    '2026-05-01',
-    '2027-04-05',
-    null,
-    'Jordan PM',
-    'SYNTHETIC connector only — not live Houston data.',
-    'Schedule foundation',
-    '2026-10-08',
-    'https://permits.houstontx.gov/',
-    'never',
-    '2026-04-05'
-  );
-
-  insertPermit.run(
-    lot3.lastInsertRowid,
-    'city_of_houston',
-    'HOU-DEMO-55002',
-    'Electrical',
-    'Plan Review',
-    'in_review',
-    'needs_followup',
-    '2026-09-01',
-    null,
-    null,
-    '2026-09-22',
-    null,
-    null,
-    '2026-10-15',
-    'Jordan PM',
-    'Revision milestone recorded separately from approval/issuance.',
-    'Upload revision set',
-    '2026-09-25',
-    'https://permits.houstontx.gov/',
-    'never',
-    '2026-09-22'
-  );
-
-  insertPermit.run(
-    lot7.lastInsertRowid,
-    'harris_county',
-    'HAR-DEMO-7701',
-    'Building',
-    'Active',
-    'issued',
-    'watching',
-    '2026-07-18',
-    '2026-08-01',
-    '2026-08-03',
-    null,
-    null,
-    null,
-    null,
-    'Riley PM',
-    'Harris County ≠ City of Houston.',
-    '',
-    null,
-    'https://oce.harriscountytx.gov/Services/Permits',
-    'never',
-    '2026-08-03'
-  );
-
-  insertPermit.run(
-    lot1.lastInsertRowid,
-    'city_of_fairfax',
-    'CFX-DEMO-1001',
-    'Residential New',
-    'In Review',
-    'in_review',
-    'watching',
-    '2026-08-12',
-    null,
-    null,
-    null,
-    null,
-    null,
-    '2026-11-01',
-    'Casey PM',
-    'City of Fairfax Accela portal — synthetic check only.',
-    'Monitor review comments',
-    '2026-10-15',
-    'https://aca-prod.accela.com/FAIRFAX/Default.aspx',
-    'never',
-    '2026-08-12'
-  );
-
-  db.prepare(
-    `INSERT INTO saved_filters(name, definition) VALUES
-     ('Needs follow-up', ?),
-     ('Fairfax County', ?),
-     ('Expiring / overdue', ?)`
-  ).run(
-    JSON.stringify({ internal_status: 'needs_followup' }),
-    JSON.stringify({ jurisdiction_code: 'fairfax_county' }),
-    JSON.stringify({ attention: true })
-  );
-
+  ensureFairfaxProbe();
   rebuildAttention();
-  console.log('Seeded synthetic demo data.');
+  console.log('Seeded Fairfax probe only (gospel xlsx not found).');
+  return { mode: 'synthetic' };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

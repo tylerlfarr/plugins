@@ -5,15 +5,25 @@ const OFFICIAL_DATE_FIELDS = [
   ['submittedDate', 'submitted_date'],
   ['approvedDate', 'approved_date'],
   ['issuedDate', 'issued_date'],
-  ['expirationDate', 'expiration_date'],
 ];
 
 /**
- * Apply a connector result without touching internal notes/milestones/owner/next_action.
- * Predicted dates are never written from connectors.
+ * Apply connector result. Never touches internal_milestones, notes_raw, owner, next_action.
  */
 export function applyConnectorResult(permit, result, changedBy = 'connector') {
   const now = result.checkedAt || new Date().toISOString();
+
+  db.prepare(
+    `INSERT INTO official_snapshots(permit_record_id, official_id, payload_json, mode, outcome, checked_at)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(
+    permit.id,
+    permit.primary_official_id,
+    JSON.stringify(result),
+    result.mode || 'unknown',
+    result.outcome || 'failed',
+    now
+  );
 
   if (result.ambiguous) {
     db.prepare(
@@ -21,23 +31,22 @@ export function applyConnectorResult(permit, result, changedBy = 'connector') {
        VALUES (?, ?, ?, ?)`
     ).run(
       permit.jurisdiction_code,
-      permit.official_id,
+      permit.primary_official_id,
       'Ambiguous official ID match',
       JSON.stringify(result.candidates || [])
     );
     db.prepare(
-      `UPDATE permits SET last_checked_at = ?, last_check_outcome = 'failed',
+      `UPDATE permit_records SET last_checked_at = ?, last_check_outcome = 'failed',
        last_check_error = ?, updated_at = datetime('now') WHERE id = ?`
-    ).run(now, result.error || 'ambiguous match', permit.id);
+    ).run(now, result.error || 'ambiguous', permit.id);
     return { outcome: 'failed', reason: 'ambiguous', mode: result.mode };
   }
 
-  if (result.outcome === 'not_found' || result.outcome === 'unavailable' || result.outcome === 'failed') {
+  if (['not_found', 'unavailable', 'failed'].includes(result.outcome)) {
     db.prepare(
-      `UPDATE permits SET last_checked_at = ?, last_check_outcome = ?, last_check_error = ?,
+      `UPDATE permit_records SET last_checked_at = ?, last_check_outcome = ?, last_check_error = ?,
        updated_at = datetime('now') WHERE id = ?`
     ).run(now, result.outcome, result.error || '', permit.id);
-
     if (result.outcome !== 'not_found') {
       upsertAttention(
         permit.id,
@@ -82,13 +91,31 @@ export function applyConnectorResult(permit, result, changedBy = 'connector') {
   }
 
   const fields = result.fields || {};
+  // Store official dates as milestones with official_ prefix? Keep on permit via source_url only;
+  // dates go to field_changes + optional internal? Spec: official snapshot separate.
+  // Persist issued/approved/submitted onto dedicated columns via milestones labeled official_*? 
+  // Simplest: update source_url and record date field changes as official_* fields in field_changes only,
+  // and also store as milestones with key official_issued_date etc. WITHOUT overwriting internal_* keys.
   for (const [src, col] of OFFICIAL_DATE_FIELDS) {
     const incoming = fields[src];
     if (incoming == null || incoming === '') continue;
-    if (String(permit[col] || '') !== String(incoming)) {
-      recordChange(permit.id, col, permit[col], incoming, changedBy, 'connector');
-      sets.push(`${col} = ?`);
-      params.push(incoming);
+    const key = `official_${col}`;
+    const existing = db
+      .prepare(`SELECT value FROM internal_milestones WHERE permit_record_id = ? AND key = ?`)
+      .get(permit.id, key);
+    // Use a separate table-like namespace: official_* milestones are connector-owned
+    if (!existing) {
+      db.prepare(
+        `INSERT INTO internal_milestones(permit_record_id, key, label, value, value_kind)
+         VALUES (?, ?, ?, ?, 'date')`
+      ).run(permit.id, key, `Official ${col}`, incoming);
+      recordChange(permit.id, key, '', incoming, changedBy, 'connector');
+      changed = true;
+    } else if (String(existing.value) !== String(incoming)) {
+      recordChange(permit.id, key, existing.value, incoming, changedBy, 'connector');
+      db.prepare(
+        `UPDATE internal_milestones SET value = ? WHERE permit_record_id = ? AND key = ?`
+      ).run(incoming, permit.id, key);
       changed = true;
     }
   }
@@ -100,50 +127,69 @@ export function applyConnectorResult(permit, result, changedBy = 'connector') {
     changed = true;
   }
 
-  if (fields.permitType && String(permit.permit_type || '') !== String(fields.permitType)) {
-    recordChange(permit.id, 'permit_type', permit.permit_type, fields.permitType, changedBy, 'connector');
-    sets.push('permit_type = ?');
-    params.push(fields.permitType);
-    changed = true;
-  }
-
   const outcome = changed ? 'updated' : 'no_change';
   sets.push('last_check_outcome = ?');
   params.push(outcome);
   params.push(permit.id);
-  db.prepare(`UPDATE permits SET ${sets.join(', ')} WHERE id = ?`).run(...params);
-  return { outcome, mode: result.mode };
+  db.prepare(`UPDATE permit_records SET ${sets.join(', ')} WHERE id = ?`).run(...params);
+  return { outcome, mode: result.mode, fieldAvailability: result.fieldAvailability };
 }
 
-export async function syncPermitById(id, { forceFail = false } = {}) {
-  const permit = db.prepare('SELECT * FROM permits WHERE id = ?').get(id);
+export async function syncPermitById(id, { forceFail = false, officialId } = {}) {
+  const permit = db.prepare('SELECT * FROM permit_records WHERE id = ?').get(id);
   if (!permit) throw new Error('Permit not found');
-  if (!permit.official_id) {
+  const oid = officialId || permit.primary_official_id;
+  if (!oid) {
     db.prepare(
-      `UPDATE permits SET last_checked_at = datetime('now'), last_check_outcome = 'failed',
+      `UPDATE permit_records SET last_checked_at = datetime('now'), last_check_outcome = 'failed',
        last_check_error = 'No official ID', updated_at = datetime('now') WHERE id = ?`
     ).run(id);
     return { outcome: 'failed', error: 'No official ID' };
   }
   const result = await checkPermit({
     jurisdictionCode: permit.jurisdiction_code,
-    officialId: permit.official_id,
+    officialId: oid,
     forceFail,
   });
   return applyConnectorResult(permit, result, getSetting('current_user', 'demo.user'));
 }
 
-export async function syncAllLinked() {
-  const rows = db
-    .prepare(
-      `SELECT id FROM permits WHERE official_id IS NOT NULL AND official_id != '' ORDER BY id`
-    )
-    .all();
+export async function syncAllLinked({ fairfaxOnly = false } = {}) {
+  let rows;
+  if (fairfaxOnly) {
+    rows = db
+      .prepare(
+        `SELECT DISTINCT p.id, oi.official_id
+         FROM permit_records p
+         JOIN official_ids oi ON oi.permit_record_id = p.id
+         WHERE oi.official_id GLOB '[A-Z][A-Z][A-Z][A-Z]-*'
+            OR p.jurisdiction_code = 'fairfax_county'
+         ORDER BY p.id`
+      )
+      .all();
+    // Also include Fairfax-shaped from mst_reference_ids not yet on permits — sync attached IDs only for now
+  } else {
+    rows = db
+      .prepare(
+        `SELECT id, primary_official_id AS official_id FROM permit_records
+         WHERE primary_official_id IS NOT NULL AND primary_official_id != ''
+         ORDER BY id`
+      )
+      .all();
+  }
+
   const results = [];
+  const seen = new Set();
   for (const row of rows) {
-    // sequential to be gentle on public APIs
+    const key = `${row.id}:${row.official_id || ''}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
     // eslint-disable-next-line no-await-in-loop
-    results.push({ id: row.id, ...(await syncPermitById(row.id)) });
+    results.push({
+      id: row.id,
+      official_id: row.official_id,
+      ...(await syncPermitById(row.id, { officialId: row.official_id })),
+    });
   }
   return results;
 }
@@ -155,11 +201,10 @@ export function rebuildAttention() {
 
   const permits = db
     .prepare(
-      `SELECT p.*, l.lot_number, pr.name AS project_name, c.name AS community_name
-       FROM permits p
-       JOIN lots l ON l.id = p.lot_id
-       JOIN projects pr ON pr.id = l.project_id
-       JOIN communities c ON c.id = pr.community_id`
+      `SELECT p.*, lg.lot_label, cs.community_name, cs.project_code
+       FROM permit_records p
+       JOIN lot_groups lg ON lg.id = p.lot_group_id
+       JOIN community_sections cs ON cs.id = lg.section_id`
     )
     .all();
 
@@ -172,26 +217,22 @@ export function rebuildAttention() {
         `overdue:${p.id}:${p.next_action_due}`
       );
     }
-    if (p.expiration_date) {
-      const exp = new Date(p.expiration_date);
-      const days = (exp - today) / (86400 * 1000);
-      if (days >= 0 && days <= 30) {
-        upsertAttention(
-          p.id,
-          'upcoming_expiration',
-          `Expires ${p.expiration_date}`,
-          `exp:${p.id}:${p.expiration_date}`
-        );
-      }
+    if (['failed', 'unavailable'].includes(p.last_check_outcome)) {
+      upsertAttention(
+        p.id,
+        'source_error',
+        `Last check ${p.last_check_outcome}: ${p.last_check_error || ''}`,
+        `lasterr:${p.id}:${p.last_check_outcome}`
+      );
     }
-    const anchor = p.official_last_changed_at || p.updated_at || p.created_at;
-    if (anchor) {
+    const anchor = p.official_last_changed_at || p.last_successful_check_at || p.updated_at;
+    if (anchor && p.primary_official_id) {
       const ageDays = (today - new Date(anchor)) / (86400 * 1000);
       if (ageDays >= staleDays && !['closed', 'cancelled', 'issued'].includes(p.official_status)) {
         upsertAttention(
           p.id,
-          'no_movement',
-          `No official movement for ~${Math.floor(ageDays)} days (threshold ${staleDays})`,
+          'stalled',
+          `Synced permit stalled ~${Math.floor(ageDays)} days (threshold ${staleDays})`,
           `stale:${p.id}:${staleDays}`
         );
       }
