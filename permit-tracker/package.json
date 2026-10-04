@@ -11,9 +11,13 @@
     "build": "vite build --config client/vite.config.js",
     "start": "NODE_ENV=production node server/index.js",
     "seed": "node server/seed.js",
-    "test": "node --test --test-concurrency=1 ./server/tests/gospel.test.js",
-    "import:gospel": "node server/seed.js",
-    "demo:import": "node server/seed.js"
+    "seed:demo": "PERMIT_DEMO=1 node server/seed.js --demo",
+    "test": "node --test --test-concurrency=1 ./server/tests/integrity.test.js && node --test --test-concurrency=1 ./server/tests/gospel.test.js",
+    "coverage:report": "node server/scripts/coverage-report.js",
+    "demo:fairfax-attention": "node server/scripts/demo-fairfax-attention.js",
+    "fixture:build": "node server/fixtures/buildSanitizedWorkbook.js",
+    "import:workbook": "node server/seed.js",
+    "demo:import": "PERMIT_DEMO=1 node server/seed.js --demo"
   },
   "dependencies": {
     "better-sqlite3": "^11.9.1",

@@ -2,20 +2,23 @@ import { pathToFileURL } from 'node:url';
 import fs from 'node:fs';
 import { db, migrate, setSetting } from './db.js';
 import { rebuildAttention } from './sync.js';
-import { importGospelFile } from './gospelImport.js';
+import { importWorkbookFile } from './workbookImport.js';
 
 migrate();
 
-const GOSPEL_CANDIDATES = [
+const SOURCE_WORKBOOK_CANDIDATES = [
+  process.env.SOURCE_WORKBOOK_XLSX,
   process.env.GOSPEL_XLSX,
   '/cursor/stores/self/internal/Permit_Tracker_9.1.2026.xlsx',
   '/cursor/stores/bc-01a10831-bc67-7d55-83fd-6645d7e3c6b1/internal/Permit_Tracker_9.1.2026.xlsx',
+  '/home/ubuntu/.cursor/projects/workspace/uploads/Permit_Tracker_9.1.2026_48a1.xlsx',
 ].filter(Boolean);
 
 function reset() {
   db.exec(`
     DELETE FROM attention_events;
     DELETE FROM match_reviews;
+    DELETE FROM import_conflicts;
     DELETE FROM field_changes;
     DELETE FROM official_snapshots;
     DELETE FROM official_ids;
@@ -26,11 +29,17 @@ function reset() {
     DELETE FROM permit_revisions;
     DELETE FROM plan_tracker_rows;
     DELETE FROM mst_reference_ids;
+    DELETE FROM archived_sheet_rows;
     DELETE FROM saved_filters;
     DELETE FROM import_runs;
+    DELETE FROM check_runs;
   `);
 }
 
+/**
+ * Isolated Fairfax live probe — demo/fixture only.
+ * Never mixed into import-origin coverage or customer exports when demo_mode is off.
+ */
 function ensureFairfaxProbe() {
   let section = db
     .prepare(
@@ -40,20 +49,28 @@ function ensureFairfaxProbe() {
   if (!section) {
     const info = db
       .prepare(
-        `INSERT INTO community_sections(project_code, community_name, jurisdiction_code, permit_time_note, header_json)
-         VALUES ('FFX-DEMO', 'Fairfax Live Probe', 'fairfax_county', 'demo overlay — not from gospel rows', '[]')`
+        `INSERT INTO community_sections(
+           project_code, community_name, jurisdiction_code, jurisdiction_source, jurisdiction_confirmed,
+           permit_time_note, header_json, record_origin
+         ) VALUES (
+           'FFX-DEMO', 'Fairfax Live Probe', 'fairfax_county', 'confirmed_mapping', 1,
+           'demo overlay — not from source workbook rows', '[]', 'demo'
+         )`
       )
       .run();
     section = { id: Number(info.lastInsertRowid) };
   }
   let lot = db
-    .prepare(`SELECT id FROM lot_groups WHERE section_id = ? AND lot_label = 'PROBE' AND housetype = 'Live connector probe'`)
+    .prepare(
+      `SELECT id FROM lot_groups WHERE section_id = ? AND lot_label = 'PROBE' AND housetype = 'Live connector probe'`
+    )
     .get(section.id);
   if (!lot) {
     const info = db
       .prepare(
-        `INSERT INTO lot_groups(section_id, lot_label, housetype, notes_raw)
-         VALUES (?, 'PROBE', 'Live connector probe', 'ALTC-2026-00970 (public Fairfax RECORDID for connector tests)')`
+        `INSERT INTO lot_groups(section_id, lot_label, housetype, stable_key, notes_raw, record_origin)
+         VALUES (?, 'PROBE', 'Live connector probe', 'ffx-demo||fairfax live probe||probe||live connector probe',
+                 'ALTC-2026-00970 (public Fairfax RECORDID for connector tests)', 'demo')`
       )
       .run(section.id);
     lot = { id: Number(info.lastInsertRowid) };
@@ -66,8 +83,11 @@ function ensureFairfaxProbe() {
   if (!permit) {
     const info = db
       .prepare(
-        `INSERT INTO permit_records(lot_group_id, primary_official_id, jurisdiction_code, internal_status, owner, next_action, next_action_due)
-         VALUES (?, 'ALTC-2026-00970', 'fairfax_county', 'watching', 'demo.user', 'Morning check', '2026-10-01')`
+        `INSERT INTO permit_records(
+           lot_group_id, primary_official_id, jurisdiction_code, jurisdiction_source,
+           jurisdiction_confirmed, internal_status, owner, next_action, next_action_due, record_origin
+         ) VALUES (?, 'ALTC-2026-00970', 'fairfax_county', 'confirmed_mapping', 1,
+                   'watching', 'demo.user', 'Morning check', '2026-10-01', 'demo')`
       )
       .run(lot.id);
     permit = { id: Number(info.lastInsertRowid) };
@@ -76,30 +96,35 @@ function ensureFairfaxProbe() {
        VALUES (?, 'ALTC-2026-00970', 'ALTC', 'fairfax_county', 1)`
     ).run(permit.id);
     db.prepare(
-      `INSERT INTO internal_milestones(permit_record_id, key, label, value, value_kind)
-       VALUES (?, 'internal_note_probe', 'Internal probe note', 'Must survive Fairfax sync', 'text')`
+      `INSERT INTO internal_milestones(permit_record_id, key, label, value, value_kind, source)
+       VALUES (?, 'internal_note_probe', 'Internal probe note', 'Must survive Fairfax sync', 'text', 'ui')`
     ).run(permit.id);
   }
 }
 
-export function seed({ preferGospel = true } = {}) {
+export function seed({ preferWorkbook = true, includeDemoProbe = false } = {}) {
   reset();
   setSetting('stale_days', '14');
   setSetting('current_user', 'demo.user');
+  const wantDemo =
+    includeDemoProbe ||
+    process.env.PERMIT_DEMO === '1' ||
+    process.argv.includes('--demo');
+  setSetting('demo_mode', wantDemo ? '1' : '0');
 
-  let usedGospel = null;
-  if (preferGospel) {
-    for (const p of GOSPEL_CANDIDATES) {
+  let usedWorkbook = null;
+  if (preferWorkbook) {
+    for (const p of SOURCE_WORKBOOK_CANDIDATES) {
       if (p && fs.existsSync(p)) {
-        usedGospel = p;
+        usedWorkbook = p;
         break;
       }
     }
   }
 
-  if (usedGospel) {
-    const { summary } = importGospelFile(usedGospel, usedGospel.split('/').pop());
-    ensureFairfaxProbe();
+  if (usedWorkbook) {
+    const { summary } = importWorkbookFile(usedWorkbook, usedWorkbook.split('/').pop());
+    if (wantDemo) ensureFairfaxProbe();
     db.prepare(
       `INSERT INTO saved_filters(name, definition) VALUES
        ('Needs follow-up', ?),
@@ -111,14 +136,19 @@ export function seed({ preferGospel = true } = {}) {
       JSON.stringify({ fairfax_shaped: true })
     );
     rebuildAttention();
-    console.log('Seeded from gospel:', usedGospel, summary);
-    return { mode: 'gospel', path: usedGospel, summary };
+    console.log('Seeded from source workbook:', usedWorkbook, summary, wantDemo ? '(+demo probe)' : '');
+    return { mode: 'workbook', path: usedWorkbook, summary, demoProbe: wantDemo };
   }
 
-  ensureFairfaxProbe();
-  rebuildAttention();
-  console.log('Seeded Fairfax probe only (gospel xlsx not found).');
-  return { mode: 'synthetic' };
+  if (wantDemo) {
+    ensureFairfaxProbe();
+    rebuildAttention();
+    console.log('Seeded Fairfax demo probe only (source workbook not found).');
+    return { mode: 'demo', demoProbe: true };
+  }
+
+  console.log('Empty seed — no source workbook and demo probe not requested.');
+  return { mode: 'empty', demoProbe: false };
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

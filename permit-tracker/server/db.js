@@ -13,6 +13,13 @@ export const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
 db.pragma('foreign_keys = ON');
 
+function addColumn(table, column, ddl) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+  if (!cols.includes(column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  }
+}
+
 export function migrate() {
   db.exec(`
     CREATE TABLE IF NOT EXISTS settings (
@@ -24,11 +31,14 @@ export function migrate() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       project_code TEXT NOT NULL,
       community_name TEXT NOT NULL,
-      jurisdiction_code TEXT NOT NULL DEFAULT 'unknown',
+      jurisdiction_code TEXT NOT NULL DEFAULT 'unresolved',
+      jurisdiction_source TEXT NOT NULL DEFAULT 'unresolved',
+      jurisdiction_confirmed INTEGER NOT NULL DEFAULT 0,
       permit_time_note TEXT DEFAULT '',
       header_json TEXT NOT NULL DEFAULT '[]',
       source_sheet TEXT NOT NULL DEFAULT 'Permit Tracker',
       source_header_row INTEGER,
+      record_origin TEXT NOT NULL DEFAULT 'import',
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       UNIQUE(project_code, community_name, source_sheet)
     );
@@ -38,8 +48,10 @@ export function migrate() {
       section_id INTEGER NOT NULL REFERENCES community_sections(id) ON DELETE CASCADE,
       lot_label TEXT NOT NULL,
       housetype TEXT DEFAULT '',
+      stable_key TEXT NOT NULL DEFAULT '',
       source_row INTEGER,
       notes_raw TEXT DEFAULT '',
+      record_origin TEXT NOT NULL DEFAULT 'import',
       created_at TEXT NOT NULL DEFAULT (datetime('now')),
       UNIQUE(section_id, lot_label, housetype)
     );
@@ -48,11 +60,14 @@ export function migrate() {
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       lot_group_id INTEGER NOT NULL REFERENCES lot_groups(id) ON DELETE CASCADE,
       primary_official_id TEXT,
-      jurisdiction_code TEXT NOT NULL DEFAULT 'unknown',
+      jurisdiction_code TEXT NOT NULL DEFAULT 'unresolved',
+      jurisdiction_source TEXT NOT NULL DEFAULT 'unresolved',
+      jurisdiction_confirmed INTEGER NOT NULL DEFAULT 0,
       permit_kind TEXT DEFAULT 'building',
       source_native_status TEXT DEFAULT '',
       official_status TEXT DEFAULT 'unknown',
       internal_status TEXT NOT NULL DEFAULT 'watching',
+      readiness_state TEXT NOT NULL DEFAULT 'unknown_stale',
       owner TEXT DEFAULT '',
       next_action TEXT DEFAULT '',
       next_action_due TEXT,
@@ -62,13 +77,12 @@ export function migrate() {
       last_check_outcome TEXT DEFAULT 'never',
       last_check_error TEXT DEFAULT '',
       official_last_changed_at TEXT,
+      progress_anchor_at TEXT,
+      baseline_snapshot_at TEXT,
+      record_origin TEXT NOT NULL DEFAULT 'import',
       updated_at TEXT NOT NULL DEFAULT (datetime('now')),
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
-
-    CREATE UNIQUE INDEX IF NOT EXISTS idx_permit_dup_key
-      ON permit_records(lot_group_id, primary_official_id)
-      WHERE primary_official_id IS NOT NULL AND primary_official_id != '';
 
     CREATE TABLE IF NOT EXISTS official_ids (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -88,6 +102,9 @@ export function migrate() {
       label TEXT NOT NULL,
       value TEXT,
       value_kind TEXT NOT NULL DEFAULT 'text',
+      source TEXT NOT NULL DEFAULT 'import',
+      edited_in_app INTEGER NOT NULL DEFAULT 0,
+      last_import_value TEXT,
       UNIQUE(permit_record_id, key)
     );
 
@@ -98,6 +115,7 @@ export function migrate() {
       payload_json TEXT NOT NULL,
       mode TEXT NOT NULL,
       outcome TEXT NOT NULL,
+      is_baseline INTEGER NOT NULL DEFAULT 0,
       checked_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
@@ -168,14 +186,55 @@ export function migrate() {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS import_conflicts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      permit_record_id INTEGER REFERENCES permit_records(id) ON DELETE CASCADE,
+      field TEXT NOT NULL,
+      previous_import_value TEXT,
+      app_value TEXT,
+      incoming_value TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      resolution TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS attention_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       permit_record_id INTEGER REFERENCES permit_records(id) ON DELETE CASCADE,
       kind TEXT NOT NULL,
       message TEXT NOT NULL,
       dedupe_key TEXT NOT NULL UNIQUE,
+      condition_key TEXT,
       acknowledged INTEGER NOT NULL DEFAULT 0,
+      resolved_at TEXT,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS check_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      started_at TEXT NOT NULL,
+      finished_at TEXT,
+      trigger TEXT NOT NULL DEFAULT 'manual',
+      scope TEXT NOT NULL DEFAULT 'linked',
+      total INTEGER NOT NULL DEFAULT 0,
+      updated INTEGER NOT NULL DEFAULT 0,
+      no_change INTEGER NOT NULL DEFAULT 0,
+      not_found INTEGER NOT NULL DEFAULT 0,
+      unavailable INTEGER NOT NULL DEFAULT 0,
+      failed INTEGER NOT NULL DEFAULT 0,
+      skipped_demo INTEGER NOT NULL DEFAULT 0,
+      summary_json TEXT DEFAULT '{}'
+    );
+
+    CREATE TABLE IF NOT EXISTS schedule_config (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      enabled INTEGER NOT NULL DEFAULT 0,
+      interval_minutes INTEGER NOT NULL DEFAULT 360,
+      timeout_ms INTEGER NOT NULL DEFAULT 15000,
+      max_retries INTEGER NOT NULL DEFAULT 2,
+      backoff_ms INTEGER NOT NULL DEFAULT 2000,
+      last_preview_at TEXT,
+      notes TEXT DEFAULT 'Local schedule preview only — does not send digests'
     );
 
     CREATE TABLE IF NOT EXISTS import_runs (
@@ -184,11 +243,51 @@ export function migrate() {
       summary_json TEXT NOT NULL,
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
+
+    CREATE TABLE IF NOT EXISTS archived_sheet_rows (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sheet_name TEXT NOT NULL,
+      source_row INTEGER,
+      payload_json TEXT NOT NULL,
+      imported_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
+  // Additive migrations for existing DBs
+  addColumn('community_sections', 'jurisdiction_source', "jurisdiction_source TEXT NOT NULL DEFAULT 'unresolved'");
+  addColumn('community_sections', 'jurisdiction_confirmed', 'jurisdiction_confirmed INTEGER NOT NULL DEFAULT 0');
+  addColumn('community_sections', 'record_origin', "record_origin TEXT NOT NULL DEFAULT 'import'");
+  addColumn('lot_groups', 'stable_key', "stable_key TEXT NOT NULL DEFAULT ''");
+  addColumn('lot_groups', 'record_origin', "record_origin TEXT NOT NULL DEFAULT 'import'");
+  addColumn('permit_records', 'jurisdiction_source', "jurisdiction_source TEXT NOT NULL DEFAULT 'unresolved'");
+  addColumn('permit_records', 'jurisdiction_confirmed', 'jurisdiction_confirmed INTEGER NOT NULL DEFAULT 0');
+  addColumn('permit_records', 'readiness_state', "readiness_state TEXT NOT NULL DEFAULT 'unknown_stale'");
+  addColumn('permit_records', 'progress_anchor_at', 'progress_anchor_at TEXT');
+  addColumn('permit_records', 'baseline_snapshot_at', 'baseline_snapshot_at TEXT');
+  addColumn('permit_records', 'record_origin', "record_origin TEXT NOT NULL DEFAULT 'import'");
+  addColumn('internal_milestones', 'source', "source TEXT NOT NULL DEFAULT 'import'");
+  addColumn('internal_milestones', 'edited_in_app', 'edited_in_app INTEGER NOT NULL DEFAULT 0');
+  addColumn('internal_milestones', 'last_import_value', 'last_import_value TEXT');
+  addColumn('official_snapshots', 'is_baseline', 'is_baseline INTEGER NOT NULL DEFAULT 0');
+  addColumn('attention_events', 'condition_key', 'condition_key TEXT');
+  addColumn('attention_events', 'resolved_at', 'resolved_at TEXT');
+
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_lot_stable ON lot_groups(stable_key) WHERE stable_key != ''`);
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_permit_lot_official
+      ON permit_records(lot_group_id, primary_official_id)
+      WHERE primary_official_id IS NOT NULL AND primary_official_id != ''
   `);
 
   if (!db.prepare("SELECT value FROM settings WHERE key = 'stale_days'").get()) {
     db.prepare(
-      "INSERT INTO settings(key, value) VALUES ('stale_days', '14'), ('current_user', 'demo.user')"
+      "INSERT INTO settings(key, value) VALUES ('stale_days', '14'), ('current_user', 'demo.user'), ('demo_mode', '0')"
+    ).run();
+  }
+  if (!db.prepare('SELECT id FROM schedule_config WHERE id = 1').get()) {
+    db.prepare(
+      `INSERT INTO schedule_config(id, enabled, interval_minutes, timeout_ms, max_retries, backoff_ms)
+       VALUES (1, 0, 360, 15000, 2, 2000)`
     ).run();
   }
 }
@@ -205,6 +304,10 @@ export function setSetting(key, value) {
   ).run(key, String(value));
 }
 
+export function isDemoMode() {
+  return getSetting('demo_mode', '0') === '1' || process.env.PERMIT_DEMO === '1';
+}
+
 export function recordChange(permitId, field, oldValue, newValue, changedBy, source) {
   const ov = oldValue ?? '';
   const nv = newValue ?? '';
@@ -216,12 +319,26 @@ export function recordChange(permitId, field, oldValue, newValue, changedBy, sou
   return true;
 }
 
-export function upsertAttention(permitId, kind, message, dedupeKey) {
+export function upsertAttention(permitId, kind, message, dedupeKey, conditionKey = null) {
   db.prepare(
-    `INSERT INTO attention_events(permit_record_id, kind, message, dedupe_key)
-     VALUES (?, ?, ?, ?)
-     ON CONFLICT(dedupe_key) DO UPDATE SET message = excluded.message, acknowledged = 0`
-  ).run(permitId, kind, message, dedupeKey);
+    `INSERT INTO attention_events(permit_record_id, kind, message, dedupe_key, condition_key, resolved_at, acknowledged)
+     VALUES (?, ?, ?, ?, ?, NULL, 0)
+     ON CONFLICT(dedupe_key) DO UPDATE SET
+       message = excluded.message,
+       condition_key = excluded.condition_key,
+       resolved_at = NULL,
+       acknowledged = CASE
+         WHEN attention_events.resolved_at IS NOT NULL THEN 0
+         ELSE attention_events.acknowledged
+       END`
+  ).run(permitId, kind, message, dedupeKey, conditionKey);
+}
+
+export function resolveAttentionByCondition(conditionKey) {
+  db.prepare(
+    `UPDATE attention_events SET resolved_at = datetime('now')
+     WHERE condition_key = ? AND resolved_at IS NULL`
+  ).run(conditionKey);
 }
 
 migrate();

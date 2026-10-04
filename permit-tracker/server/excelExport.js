@@ -2,7 +2,8 @@ import XLSX from 'xlsx';
 import { db } from './db.js';
 
 /**
- * Coexistence export: reconciliable columns for morning meeting + workbook merge.
+ * Structured coexistence export (not a proven round-trip).
+ * Import-origin records only — fixtures/demo probes excluded.
  */
 export function exportCoexistenceXlsx() {
   const permitRows = db
@@ -17,6 +18,9 @@ export function exportCoexistenceXlsx() {
          p.id AS permit_record_id,
          p.primary_official_id,
          p.jurisdiction_code,
+         p.jurisdiction_source,
+         p.jurisdiction_confirmed,
+         p.readiness_state,
          p.source_native_status,
          p.official_status,
          p.internal_status,
@@ -26,11 +30,13 @@ export function exportCoexistenceXlsx() {
          p.source_url,
          p.last_check_outcome,
          p.last_successful_check_at,
+         p.progress_anchor_at,
          p.last_check_error,
          p.official_last_changed_at
        FROM permit_records p
        JOIN lot_groups lg ON lg.id = p.lot_group_id
        JOIN community_sections cs ON cs.id = lg.section_id
+       WHERE p.record_origin = 'import'
        ORDER BY cs.community_name, lg.lot_label, p.id`
     )
     .all();
@@ -56,8 +62,11 @@ export function exportCoexistenceXlsx() {
       lot_label: r.lot_label,
       housetype: r.housetype,
       jurisdiction_code: r.jurisdiction_code,
+      jurisdiction_source: r.jurisdiction_source,
+      jurisdiction_confirmed: r.jurisdiction_confirmed,
       primary_official_id: r.primary_official_id,
       all_official_ids: ids.map((i) => i.official_id).join(' / '),
+      readiness_state: r.readiness_state,
       source_native_status: r.source_native_status,
       official_status: r.official_status,
       internal_status: r.internal_status,
@@ -68,6 +77,7 @@ export function exportCoexistenceXlsx() {
       source_url: r.source_url,
       last_check_outcome: r.last_check_outcome,
       last_successful_check_at: r.last_successful_check_at,
+      progress_anchor_at: r.progress_anchor_at,
       last_check_error: r.last_check_error,
       ...mileObj,
     };
@@ -75,13 +85,14 @@ export function exportCoexistenceXlsx() {
 
   const attention = db
     .prepare(
-      `SELECT a.kind, a.message, a.created_at, a.acknowledged,
+      `SELECT a.kind, a.message, a.created_at, a.acknowledged, a.resolved_at,
               cs.community_name, lg.lot_label, p.primary_official_id, p.official_status
        FROM attention_events a
        LEFT JOIN permit_records p ON p.id = a.permit_record_id
        LEFT JOIN lot_groups lg ON lg.id = p.lot_group_id
        LEFT JOIN community_sections cs ON cs.id = lg.section_id
-       WHERE a.acknowledged = 0
+       WHERE a.acknowledged = 0 AND a.resolved_at IS NULL
+         AND (p.id IS NULL OR p.record_origin = 'import')
        ORDER BY a.created_at DESC`
     )
     .all();

@@ -1,53 +1,95 @@
 import { JURISDICTIONS, FAIRFAX_FIELD_AVAILABILITY } from './types.js';
 import { checkFairfaxPermit } from './fairfax.js';
 import { checkSyntheticPermit } from './synthetic.js';
-import { isFairfaxShapedId, guessJurisdictionFromId } from '../gospelImport.js';
+import { isFairfaxCountyQueryCandidate } from '../ids.js';
 
 export { JURISDICTIONS, FAIRFAX_FIELD_AVAILABILITY };
 
 /**
- * Route checks:
- * - Fairfax-shaped IDs always try live Fairfax first (workbook-native Fairfax sync).
- * - Otherwise use jurisdiction adapter (synthetic unless live).
+ * Route checks — integrity rules:
+ * - Never fall back from failed/not_found live lookups to synthetic updates.
+ * - Synthetic only when explicitly allowed AND record is demo/fixture origin.
+ * - Unsupported jurisdiction without live adapter → unavailable (not synthetic invent).
  */
-export async function checkPermit({ jurisdictionCode, officialId, forceFail = false }) {
+export async function checkPermit({
+  jurisdictionCode,
+  officialId,
+  forceFail = false,
+  allowSynthetic = false,
+  recordOrigin = 'import',
+}) {
   const checkedAt = new Date().toISOString();
   if (!officialId) {
-    return { outcome: 'failed', mode: 'synthetic', error: 'officialId required', checkedAt };
+    return { outcome: 'failed', mode: 'none', error: 'officialId required', checkedAt };
   }
+
+  const isDemoRecord = recordOrigin === 'demo' || recordOrigin === 'fixture';
 
   if (forceFail) {
-    return checkSyntheticPermit({ jurisdictionCode, officialId, forceFail: true });
-  }
-
-  if (isFairfaxShapedId(officialId) || jurisdictionCode === 'fairfax_county') {
-    const live = await checkFairfaxPermit({ officialId });
-    // If Fairfax-shaped but not in Fairfax layer, fall through to synthetic jurisdiction guess
-    if (live.outcome === 'not_found' && jurisdictionCode !== 'fairfax_county') {
-      const guess = guessJurisdictionFromId(officialId);
-      const syn = await checkSyntheticPermit({
-        jurisdictionCode: guess !== 'unknown' ? guess : jurisdictionCode,
-        officialId,
-      });
-      return {
-        ...syn,
-        fairfaxAttempt: 'not_found',
-        note: 'Fairfax-shaped ID not in Fairfax Building Records PLUS; synthetic/other adapter used if available.',
-      };
+    if (allowSynthetic && isDemoRecord) {
+      return checkSyntheticPermit({ jurisdictionCode, officialId, forceFail: true });
     }
-    return live;
-  }
-
-  const meta = JURISDICTIONS[jurisdictionCode];
-  if (!meta) {
     return {
-      outcome: 'unavailable',
-      mode: 'synthetic',
-      error: `Unknown jurisdiction ${jurisdictionCode}`,
+      outcome: 'failed',
+      mode: 'live',
+      error: 'Simulated check failure',
       checkedAt,
     };
   }
-  return checkSyntheticPermit({ jurisdictionCode, officialId, forceFail });
+
+  const prefix = String(officialId).toUpperCase().match(/^([A-Z]+)/)?.[1];
+  const strongFairfax = ['ALTC', 'ALTR', 'BLDR'].includes(prefix);
+  const meta = JURISDICTIONS[jurisdictionCode] || JURISDICTIONS.unresolved;
+
+  // Confirmed Fairfax mapping OR strong Fairfax prefixes → live FeatureServer only
+  if (jurisdictionCode === 'fairfax_county' || (strongFairfax && jurisdictionCode === 'unresolved')) {
+    // Strong prefix with unresolved jurisdiction: still try Fairfax live (suggest path)
+    const live = await checkFairfaxPermit({ officialId });
+    // Do NOT fall back to synthetic on not_found / unavailable / failed
+    return live;
+  }
+
+  if (strongFairfax && jurisdictionCode !== 'fairfax_county' && jurisdictionCode !== 'unresolved') {
+    // e.g. ALTC under a confirmed non-Fairfax section — do not silently query Fairfax
+    return {
+      outcome: 'unavailable',
+      mode: 'none',
+      error: `${prefix} ID under confirmed ${meta.label}; confirm whether Fairfax live applies before querying`,
+      checkedAt,
+      connectorStatus: 'jurisdiction_mismatch',
+    };
+  }
+
+  // BLDC without confirmed Fairfax: ambiguous only when jurisdiction unresolved
+  if (prefix === 'BLDC' && jurisdictionCode === 'unresolved') {
+    return {
+      outcome: 'unavailable',
+      mode: 'none',
+      error:
+        'BLDC ID is jurisdiction-ambiguous (Fairfax PLUS vs Loudoun). Confirm jurisdiction before live check; no synthetic fallback.',
+      checkedAt,
+      connectorStatus: 'ambiguous',
+    };
+  }
+
+  // Confirmed Fairfax + BLDC → live
+  if (prefix === 'BLDC' && jurisdictionCode === 'fairfax_county') {
+    return checkFairfaxPermit({ officialId });
+  }
+
+  // Non-live / unsupported jurisdictions for import records
+  if (!allowSynthetic || !isDemoRecord) {
+    return {
+      outcome: 'unavailable',
+      mode: 'none',
+      error: `${meta.label} has no verified read-only connector in this build`,
+      checkedAt,
+      connectorStatus: 'unsupported',
+    };
+  }
+
+  // Isolated demo/fixture only
+  return checkSyntheticPermit({ jurisdictionCode, officialId, forceFail: false });
 }
 
 export function listConnectors() {

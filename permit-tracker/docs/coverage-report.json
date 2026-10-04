@@ -1,0 +1,215 @@
+{
+  "generatedAt": "2026-10-04T19:54:55.644Z",
+  "workbook": "/cursor/stores/self/internal/Permit_Tracker_9.1.2026.xlsx",
+  "exclusions": {
+    "demo_fixture_permits": 0,
+    "note": "Coverage counts use record_origin=import only. Fixtures/probes excluded."
+  },
+  "entityCounts": {
+    "sheets_in_workbook": [
+      "Permit Tracker",
+      "Masterfile Plan Tracker",
+      "WHSD Masterfile",
+      "Permit Revisions",
+      "Indirect Cost",
+      "MST's",
+      "2018 IRC Tracker",
+      "Corewall Alternative Tracker"
+    ],
+    "active_import_sheets": [
+      "Permit Tracker",
+      "Permit Revisions",
+      "Masterfile Plan Tracker",
+      "MST's"
+    ],
+    "archived_sheets": [
+      "Indirect Cost",
+      "2018 IRC Tracker",
+      "Corewall Alternative Tracker",
+      "WHSD Masterfile"
+    ],
+    "community_sections": 24,
+    "lot_groups": 281,
+    "permit_records": 293,
+    "with_official_id": 22,
+    "without_official_id": 271,
+    "official_id_links": 22,
+    "revisions": 2,
+    "masterfile": 18,
+    "mst_ids": 52,
+    "match_reviews": 0,
+    "archived_rows_stored": 135,
+    "multi_record_rows": 20
+  },
+  "meanings": {
+    "community_section": "One Permit Tracker header block (Proj ID + column set)",
+    "lot_group": "Stable identity: project + community + lot label + housetype (lot ranges preserved)",
+    "permit_record": "One official-record shell per official ID (or one no-ID shell per lot)",
+    "discrepancy": "Lot groups ≠ permit records when a notes cell has multiple IDs (multi-record) or when ID-less lots still get a tracking shell"
+  },
+  "jurisdictionBreakdown": [
+    {
+      "jurisdiction_code": "prince_william_county",
+      "jurisdiction_source": "confirmed_mapping",
+      "jurisdiction_confirmed": 1,
+      "c": 244
+    },
+    {
+      "jurisdiction_code": "loudoun_county",
+      "jurisdiction_source": "confirmed_mapping",
+      "jurisdiction_confirmed": 1,
+      "c": 33
+    },
+    {
+      "jurisdiction_code": "unresolved",
+      "jurisdiction_source": "unresolved",
+      "jurisdiction_confirmed": 0,
+      "c": 16
+    }
+  ],
+  "sectionJurisdiction": [
+    {
+      "jurisdiction_code": "loudoun_county",
+      "jurisdiction_source": "confirmed_mapping",
+      "jurisdiction_confirmed": 1,
+      "c": 6
+    },
+    {
+      "jurisdiction_code": "prince_william_county",
+      "jurisdiction_source": "confirmed_mapping",
+      "jurisdiction_confirmed": 1,
+      "c": 12
+    },
+    {
+      "jurisdiction_code": "unresolved",
+      "jurisdiction_source": "unresolved",
+      "jurisdiction_confirmed": 0,
+      "c": 6
+    }
+  ],
+  "uniqueOfficialIds": 22,
+  "idsByPrefix": {
+    "BLD": 8,
+    "BLDC": 5,
+    "BPR": 1,
+    "ZNA": 7,
+    "ZONC": 1
+  },
+  "liveFairfaxChecks": {
+    "note": "Confirmed Fairfax County Permit Tracker rows only (this workbook has none)",
+    "attempted": 0,
+    "matched": 0,
+    "not_found": 0,
+    "unavailable": 0,
+    "failed": 0,
+    "results": []
+  },
+  "mstFairfaxReferenceLiveChecks": {
+    "note": "MST sheet Fairfax-column reference IDs — not auto-linked to lots; not demo probes",
+    "attempted": 0,
+    "matched": 0,
+    "results": []
+  },
+  "bldcConfirmedLoudounGuard": {
+    "note": "BLDC under confirmed Loudoun must return unavailable — no Fairfax live guess, no synthetic",
+    "results": [
+      {
+        "official_id": "BLDC-2026-013456",
+        "outcome": "unavailable",
+        "mode": "none",
+        "error": "Loudoun County, VA has no verified read-only connector in this build"
+      },
+      {
+        "official_id": "BLDC-2026-040694",
+        "outcome": "unavailable",
+        "mode": "none",
+        "error": "Loudoun County, VA has no verified read-only connector in this build"
+      },
+      {
+        "official_id": "BLDC-2026-040699",
+        "outcome": "unavailable",
+        "mode": "none",
+        "error": "Loudoun County, VA has no verified read-only connector in this build"
+      }
+    ]
+  },
+  "unsupportedChecks": {
+    "note": "No synthetic fallback — outcome must be unavailable/not_found",
+    "results": [
+      {
+        "official_id": "BLD2026-04765",
+        "jurisdiction_code": "prince_william_county",
+        "outcome": "unavailable",
+        "mode": "none",
+        "error": "Prince William County, VA has no verified read-only connector in this build"
+      },
+      {
+        "official_id": "ZNA2026-04510",
+        "jurisdiction_code": "prince_william_county",
+        "outcome": "unavailable",
+        "mode": "none",
+        "error": "Prince William County, VA has no verified read-only connector in this build"
+      },
+      {
+        "official_id": "BLDC-2026-013456",
+        "jurisdiction_code": "loudoun_county",
+        "outcome": "unavailable",
+        "mode": "none",
+        "error": "Loudoun County, VA has no verified read-only connector in this build"
+      },
+      {
+        "official_id": "ZONC-2026-016733",
+        "jurisdiction_code": "loudoun_county",
+        "outcome": "unavailable",
+        "mode": "none",
+        "error": "Loudoun County, VA has no verified read-only connector in this build"
+      },
+      {
+        "official_id": "BLDC-2026-040694",
+        "jurisdiction_code": "loudoun_county",
+        "outcome": "unavailable",
+        "mode": "none",
+        "error": "Loudoun County, VA has no verified read-only connector in this build"
+      },
+      {
+        "official_id": "BLDC-2026-040699",
+        "jurisdiction_code": "loudoun_county",
+        "outcome": "unavailable",
+        "mode": "none",
+        "error": "Loudoun County, VA has no verified read-only connector in this build"
+      },
+      {
+        "official_id": "BLDC-2026-029826",
+        "jurisdiction_code": "loudoun_county",
+        "outcome": "unavailable",
+        "mode": "none",
+        "error": "Loudoun County, VA has no verified read-only connector in this build"
+      },
+      {
+        "official_id": "BLD2025-05425",
+        "jurisdiction_code": "prince_william_county",
+        "outcome": "unavailable",
+        "mode": "none",
+        "error": "Prince William County, VA has no verified read-only connector in this build"
+      }
+    ]
+  },
+  "addressParcelMatching": "Not implemented. ID-less rows require human review; no automatic address/parcel matching in this milestone.",
+  "mstLinking": "MST sheet IDs stored as reference only; no automatic link to Permit Tracker lots without explicit evidence.",
+  "fieldAvailabilityFairfax": {
+    "live": [
+      "RECORDID",
+      "RECORD_STATUS",
+      "SUBMITTED_DATE",
+      "APPROVED_DATE",
+      "ISSUED_DATE",
+      "LINK_URL"
+    ],
+    "unavailable_on_plus_layer": [
+      "pending",
+      "reviewer_comments",
+      "holds",
+      "inspections"
+    ]
+  }
+}

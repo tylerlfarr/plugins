@@ -33,6 +33,8 @@ export default function App() {
   const [bulk, setBulk] = useState({ internal_status: '', owner: '' });
   const [message, setMessage] = useState('');
   const [importPreview, setImportPreview] = useState(null);
+  const [schedule, setSchedule] = useState(null);
+  const [conflicts, setConflicts] = useState([]);
   const [busy, setBusy] = useState(false);
 
   const connectors = meta.connectors || [];
@@ -70,7 +72,13 @@ export default function App() {
 
   useEffect(() => {
     if (tab === 'attention') {
-      api('/api/attention').then((d) => setAttention(d.items));
+      Promise.all([api('/api/attention'), api('/api/schedule/preview'), api('/api/conflicts')]).then(
+        ([a, s, c]) => {
+          setAttention(a.items);
+          setSchedule(s);
+          setConflicts(c.conflicts);
+        }
+      );
     }
   }, [tab]);
 
@@ -122,10 +130,14 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ fairfaxOnly: true }),
       });
-      setMessage(`Fairfax-shaped sync finished: ${data.results.length} checks.`);
+      setMessage(
+        `Fairfax sync finished: ${data.counts?.total ?? data.results?.length ?? 0} checks` +
+          (data.counts ? ` (updated ${data.counts.updated}, no_change ${data.counts.no_change})` : '')
+      );
       await refreshLists();
       if (tab === 'attention') {
         setAttention((await api('/api/attention')).items);
+        setSchedule(await api('/api/schedule/preview'));
       }
     } finally {
       setBusy(false);
@@ -148,12 +160,13 @@ export default function App() {
     await refreshLists();
   }
 
-  async function importStoreGospel() {
+  async function importStoreWorkbook() {
     setBusy(true);
     try {
-      const data = await api('/api/import/gospel/store', { method: 'POST' });
+      const data = await api('/api/import/workbook/store', { method: 'POST' });
       setMessage(
-        `Gospel import: ${data.summary.permits_created} created, ${data.summary.permits_updated} updated, ${data.summary.sections} sections, ${data.summary.official_ids} IDs.`
+        `Source workbook import: ${data.summary.permits_created} created, ${data.summary.permits_updated} updated, ${data.summary.sections} sections, ${data.summary.official_ids} IDs` +
+          (data.summary.conflicts ? `, ${data.summary.conflicts} conflicts` : '')
       );
       await refreshLists();
     } catch (e) {
@@ -166,7 +179,7 @@ export default function App() {
   async function previewFile(file) {
     const fd = new FormData();
     fd.append('file', file);
-    const data = await api('/api/import/gospel/preview', { method: 'POST', body: fd });
+    const data = await api('/api/import/workbook/preview', { method: 'POST', body: fd });
     setImportPreview(data);
     setTab('import');
   }
@@ -176,7 +189,7 @@ export default function App() {
     fd.append('file', file);
     setBusy(true);
     try {
-      const data = await api('/api/import/gospel/commit', { method: 'POST', body: fd });
+      const data = await api('/api/import/workbook/commit', { method: 'POST', body: fd });
       setMessage(`Committed: ${JSON.stringify(data.summary)}`);
       await refreshLists();
     } finally {
@@ -215,8 +228,8 @@ export default function App() {
 
       <div className="banner warn">
         Fairfax County = live GIS reads (issued-heavy; no pending/comments/holds/inspections).
-        Loudoun + Prince William + Houston/Harris = labeled synthetic. Gospel workbook import is
-        section-aware.
+        Loudoun + Prince William + other AHJs = unsupported (unavailable — no live→synthetic
+        fallback). Source workbook import is section-aware; fixtures stay isolated from imports.
       </div>
       {stats ? (
         <div className="banner">
@@ -304,10 +317,10 @@ export default function App() {
               ))}
             </select>
             <a className="btn" href="/api/export.xlsx">
-              Export coexistence Excel
+              Structured export
             </a>
             <button type="button" className="btn primary" disabled={busy} onClick={syncFairfaxShaped}>
-              Sync Fairfax-shaped IDs
+              Run Fairfax checks
             </button>
           </div>
 
@@ -378,8 +391,13 @@ export default function App() {
                       </td>
                       <td>
                         <div className="mono">{p.primary_official_id || '—'}</div>
-                        <span className={`pill ${p.fairfax_shaped ? 'live' : 'synthetic'}`}>
+                        <span
+                          className={`pill ${
+                            p.jurisdiction_code === 'fairfax_county' ? 'live' : 'warn'
+                          }`}
+                        >
                           {p.jurisdiction_code}
+                          {p.jurisdiction_confirmed ? '' : ' · unconfirmed'}
                         </span>
                       </td>
                       <td>
@@ -388,7 +406,7 @@ export default function App() {
                       </td>
                       <td>
                         <div>{p.internal_status}</div>
-                        <div className="muted">{p.owner}</div>
+                        <div className="muted">{p.readiness_state || ''} · {p.owner}</div>
                       </td>
                       <td>
                         <div>{p.last_check_outcome}</div>
@@ -493,7 +511,39 @@ export default function App() {
       {tab === 'attention' && (
         <div className="panel stack">
           <h2>Attention — morning meeting</h2>
-          <p className="muted">Status changes, stalled synced permits, failed/unavailable checks, overdue actions.</p>
+          <p className="muted">
+            Separate clocks: no progress (progress_anchor), source missing/failed checks, unresolved
+            matching, overdue internal actions. Successful checks do not reset the progress clock.
+          </p>
+          {schedule ? (
+            <div className="attention-item">
+              <strong>Schedule preview (local — not sent)</strong>
+              <div className="muted">
+                Interval {schedule.config?.interval_minutes}m · retries {schedule.config?.max_retries} ·
+                backoff {schedule.config?.backoff_ms}ms · timeout {schedule.config?.timeout_ms}ms
+              </div>
+              <div>{schedule.digestPreview?.subject}</div>
+              <ul className="history">
+                {(schedule.digestPreview?.bullets || []).map((b) => (
+                  <li key={b}>{b}</li>
+                ))}
+              </ul>
+              <div className="muted">{schedule.digestPreview?.note}</div>
+            </div>
+          ) : null}
+          {conflicts.length > 0 ? (
+            <div className="attention-item warn">
+              <strong>Import conflicts pending: {conflicts.length}</strong>
+              <ul className="history">
+                {conflicts.slice(0, 8).map((c) => (
+                  <li key={c.id}>
+                    {c.community_name} / {c.lot_label} · {c.field}: app={c.app_value} vs
+                    incoming={c.incoming_value}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
           {attention.length === 0 ? (
             <p>No open items.</p>
           ) : (
@@ -501,6 +551,7 @@ export default function App() {
               <div key={a.id} className={`attention-item ${a.kind}`}>
                 <div>
                   <strong>{a.kind}</strong> · {a.community_name} / {a.lot_label}
+                  {a.readiness_state ? ` · ${a.readiness_state}` : ''}
                 </div>
                 <div>{a.message}</div>
                 <div className="muted mono">{a.primary_official_id || '—'}</div>
@@ -522,15 +573,15 @@ export default function App() {
 
       {tab === 'import' && (
         <div className="panel stack">
-          <h2>Gospel workbook import</h2>
+          <h2>Source workbook import</h2>
           <p className="muted">
-            Section-aware Permit Tracker import (24 repeating header blocks), plus Permit Revisions,
-            Masterfile Plan Tracker, and MST reference IDs. Indirect Cost / 2018 IRC / Corewall /
-            WHSD ignored for this milestone.
+            Import profile for this employer workbook (separate from reusable core). Section-aware
+            Permit Tracker (24 header blocks), Permit Revisions, Masterfile Plan Tracker, MST
+            references. Indirect Cost / 2018 IRC / Corewall / WHSD are archived (not wiped).
           </p>
           <div className="toolbar">
-            <button type="button" className="btn primary" disabled={busy} onClick={importStoreGospel}>
-              Import store gospel xlsx
+            <button type="button" className="btn primary" disabled={busy} onClick={importStoreWorkbook}>
+              Import store source workbook
             </button>
             <label className="btn">
               Preview upload
@@ -554,9 +605,12 @@ export default function App() {
           {importPreview ? (
             <>
               <div>
-                {importPreview.sectionCount} sections · {importPreview.rowCount} lot rows ·{' '}
+                {importPreview.sectionCount} sections · {importPreview.rowCount} lot/permit rows ·{' '}
                 {importPreview.revisions} revisions · {importPreview.masterfile} masterfile ·{' '}
                 {importPreview.mstIds} MST IDs
+                {importPreview.archivedRowCount
+                  ? ` · ${importPreview.archivedRowCount} archived rows stored`
+                  : ''}
               </div>
               <div className="table-wrap">
                 <table>
@@ -565,6 +619,7 @@ export default function App() {
                       <th>Project</th>
                       <th>Community</th>
                       <th>Jurisdiction</th>
+                      <th>Source</th>
                       <th>Header row</th>
                       <th>Cols</th>
                     </tr>
@@ -575,6 +630,7 @@ export default function App() {
                         <td className="mono">{s.project_code}</td>
                         <td>{s.community_name}</td>
                         <td>{s.jurisdiction_code}</td>
+                        <td className="muted">{s.jurisdiction_source}</td>
                         <td>{s.headerRow}</td>
                         <td>{s.headerCount}</td>
                       </tr>
@@ -584,7 +640,9 @@ export default function App() {
               </div>
             </>
           ) : (
-            <p className="muted">Upload a workbook to preview sections, or import the store gospel.</p>
+            <p className="muted">
+              Upload a workbook to preview sections, or import the store source workbook.
+            </p>
           )}
         </div>
       )}
