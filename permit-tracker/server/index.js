@@ -93,6 +93,8 @@ import XLSX from 'xlsx';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.join(__dirname, '..');
 const clientDist = path.join(root, 'client', 'dist');
+const clientIndex = path.join(clientDist, 'index.html');
+const frontendBuilt = () => fs.existsSync(clientIndex);
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 const requestActor = new AsyncLocalStorage();
 
@@ -143,12 +145,19 @@ const PERMIT_SQL = `SELECT p.*,
   JOIN community_sections cs ON cs.id = lg.section_id`;
 
 app.get('/api/health', (_req, res) => {
+  const built = frontendBuilt();
   res.json({
     ok: true,
     service: 'permit-ledger',
     mode: 'workbook-native-prototype',
     auth: authEnabled(),
     dbPathConfigured: Boolean(process.env.PERMIT_DB_PATH),
+    dbPath: getDbPath(),
+    frontendBuilt: built,
+    clientDist: 'client/dist',
+    diagnostic: built
+      ? null
+      : 'Frontend assets missing: run `npm run build` so client/dist/index.html exists before start. API may still respond.',
   });
 });
 
@@ -1328,11 +1337,23 @@ app.post('/api/seed', requireAuth, requireOwner, (req, res) => {
   res.json(result);
 });
 
-if (fs.existsSync(clientDist)) {
+if (frontendBuilt()) {
   app.use(express.static(clientDist));
   app.get('*', (req, res, next) => {
     if (req.path.startsWith('/api')) return next();
-    res.sendFile(path.join(clientDist, 'index.html'));
+    res.sendFile(clientIndex);
+  });
+} else {
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api')) return next();
+    res.status(503).type('html').send(`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><title>Permit Ledger — frontend not built</title></head>
+<body style="font-family:system-ui,sans-serif;max-width:40rem;margin:3rem auto;padding:0 1rem;line-height:1.5">
+  <h1>Frontend assets missing</h1>
+  <p>The API process is running, but <code>client/dist/index.html</code> was not found.</p>
+  <p>On Hostinger / production hosts, ensure the build step runs <code>npm run build</code> after install so Vite writes <code>client/dist</code> into the deploy package, then restart.</p>
+  <p>Check <code>GET /api/health</code> — <code>frontendBuilt</code> should be <code>true</code>.</p>
+</body></html>`);
   });
 }
 
