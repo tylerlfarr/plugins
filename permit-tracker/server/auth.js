@@ -13,6 +13,9 @@ export const COOKIE_NAME = 'permit_ledger_session';
 export const ROLES = Object.freeze({ OWNER: 'owner', OPERATOR: 'operator' });
 
 const SESSION_DAYS = 14;
+const LOGIN_WINDOW_MS = 15 * 60 * 1000;
+const LOGIN_MAX_ATTEMPTS = 10;
+const loginAttempts = new Map();
 
 export function ensureAuthTables() {
   db.exec(`
@@ -65,11 +68,58 @@ function hashToken(token) {
   return crypto.createHash('sha256').update(token).digest('hex');
 }
 
+/**
+ * Auth is fail-closed for production / pilot.
+ * Explicit PILOT_AUTH=0 preserves local Try Live and unit tests.
+ * Explicit PILOT_AUTH=1 forces auth on.
+ * NODE_ENV=production without PILOT_AUTH=0 requires auth (never silently open).
+ */
 export function authEnabled() {
-  // Deploy/pilot: PILOT_AUTH=1. Local Try Live / tests default off unless set.
   if (process.env.PILOT_AUTH === '0') return false;
   if (process.env.PILOT_AUTH === '1') return true;
-  return Boolean(process.env.SESSION_SECRET && process.env.NODE_ENV === 'production');
+  return process.env.NODE_ENV === 'production';
+}
+
+function userCount() {
+  ensureAuthTables();
+  return db.prepare(`SELECT COUNT(*) AS c FROM users`).get().c;
+}
+
+/**
+ * First-boot: require valid OWNER_EMAIL + OWNER_PASSWORD (>=10).
+ * Existing DB with users: restart allowed without bootstrap credentials.
+ * Returns { ok, mode } or throws Error with code PILOT_AUTH_CONFIG.
+ */
+export function assertPilotAuthConfig() {
+  if (!authEnabled()) return { ok: true, mode: 'auth_disabled' };
+  ensureAuthTables();
+  const count = userCount();
+  if (count > 0) return { ok: true, mode: 'existing_users' };
+
+  const email = (process.env.OWNER_EMAIL || '').trim().toLowerCase();
+  const password = process.env.OWNER_PASSWORD || '';
+  if (!email || !email.includes('@')) {
+    const err = new Error(
+      'Pilot auth is enabled but no users exist and OWNER_EMAIL is missing/invalid. ' +
+        'Set OWNER_EMAIL and OWNER_PASSWORD (≥10 chars) for first boot, or PILOT_AUTH=0 for local demo only.'
+    );
+    err.code = 'PILOT_AUTH_CONFIG';
+    throw err;
+  }
+  if (String(password).length < 10) {
+    const err = new Error(
+      'Pilot auth is enabled but OWNER_PASSWORD must be at least 10 characters for first-boot owner bootstrap.'
+    );
+    err.code = 'PILOT_AUTH_CONFIG';
+    throw err;
+  }
+  const owner = bootstrapOwnerFromEnv();
+  if (!owner) {
+    const err = new Error('Owner bootstrap failed despite credentials being present.');
+    err.code = 'PILOT_AUTH_CONFIG';
+    throw err;
+  }
+  return { ok: true, mode: 'bootstrapped' };
 }
 
 export function bootstrapOwnerFromEnv() {
@@ -77,9 +127,10 @@ export function bootstrapOwnerFromEnv() {
   const email = (process.env.OWNER_EMAIL || '').trim().toLowerCase();
   const password = process.env.OWNER_PASSWORD || '';
   if (!email || !password) return null;
+  if (String(password).length < 10) return null;
   const existing = db.prepare(`SELECT * FROM users WHERE lower(email) = ?`).get(email);
   if (existing) return existing;
-  if (db.prepare(`SELECT COUNT(*) AS c FROM users`).get().c > 0) return null;
+  if (userCount() > 0) return null;
   const info = db
     .prepare(
       `INSERT INTO users(email, display_name, role, password_hash)
@@ -130,6 +181,47 @@ export function acceptInvite({ token, password, displayName = '' }) {
   }
   db.prepare(`UPDATE invites SET used_at = datetime('now') WHERE id = ?`).run(inv.id);
   return user;
+}
+
+function pruneLoginAttempts(now = Date.now()) {
+  for (const [key, entry] of loginAttempts) {
+    if (now - entry.windowStart > LOGIN_WINDOW_MS) loginAttempts.delete(key);
+  }
+}
+
+export function loginThrottleKey(email, ip = '') {
+  return `${String(email || '').toLowerCase()}|${ip || 'unknown'}`;
+}
+
+/** Throws if this identity/IP exceeded bounded login attempts. */
+export function assertLoginAllowed(key) {
+  pruneLoginAttempts();
+  const entry = loginAttempts.get(key);
+  if (entry && entry.count >= LOGIN_MAX_ATTEMPTS) {
+    const err = new Error('Too many login attempts. Try again later.');
+    err.code = 'LOGIN_THROTTLED';
+    throw err;
+  }
+}
+
+export function recordLoginFailure(key) {
+  pruneLoginAttempts();
+  const now = Date.now();
+  const entry = loginAttempts.get(key);
+  if (!entry || now - entry.windowStart > LOGIN_WINDOW_MS) {
+    loginAttempts.set(key, { count: 1, windowStart: now });
+    return;
+  }
+  entry.count += 1;
+}
+
+export function clearLoginFailures(key) {
+  loginAttempts.delete(key);
+}
+
+/** Test helper — reset in-memory throttle state. */
+export function _resetLoginThrottleForTests() {
+  loginAttempts.clear();
 }
 
 export function login(email, password) {
@@ -245,23 +337,29 @@ export function requireOwner(req, res, next) {
   next();
 }
 
-/** CSRF-ish protection for state-changing requests when auth is on: require same-origin or X-Requested-With */
+/**
+ * CSRF / cross-origin guard for state-changing requests when auth is on.
+ * Deployed FE+API are same-origin. A mismatched Origin is always rejected —
+ * X-Requested-With alone is never treated as an authorized cross-origin signal.
+ */
 export function protectStateChange(req, res, next) {
   if (!authEnabled()) return next();
   if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
-  const xhr = req.headers['x-requested-with'];
+
   const origin = req.headers.origin;
   const host = req.headers.host;
-  if (xhr === 'PermitLedger') return next();
-  if (origin && host) {
+  const xhr = req.headers['x-requested-with'];
+
+  if (origin) {
     try {
-      const o = new URL(origin);
-      if (o.host === host) return next();
+      if (host && new URL(origin).host === host) return next();
     } catch {
-      /* fall through */
+      return res.status(403).json({ error: 'Invalid Origin' });
     }
+    return res.status(403).json({ error: 'Cross-origin state-changing request rejected' });
   }
-  // Same-site cookie navigations without Origin (e.g. some form posts) — allow if Referer matches host
+
+  // No Origin (same-origin navigations / non-browser): require matching Referer or app header.
   const referer = req.headers.referer;
   if (referer && host) {
     try {
@@ -270,18 +368,15 @@ export function protectStateChange(req, res, next) {
       /* fall through */
     }
   }
-  // JSON API clients must send X-Requested-With
-  if (req.headers['content-type']?.includes('application/json') && !xhr) {
-    return res.status(403).json({ error: 'Missing X-Requested-With for state-changing request' });
-  }
-  next();
+  if (xhr === 'PermitLedger') return next();
+  return res.status(403).json({ error: 'Forbidden state-changing request' });
 }
 
 export function authStatus() {
   ensureAuthTables();
   return {
     enabled: authEnabled(),
-    userCount: db.prepare(`SELECT COUNT(*) AS c FROM users`).get().c,
+    userCount: userCount(),
     businessName: getSetting('business_name', ''),
     ownerBootstrapConfigured: Boolean(process.env.OWNER_EMAIL),
   };

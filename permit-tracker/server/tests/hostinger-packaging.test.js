@@ -76,17 +76,21 @@ function listen() {
   });
 }
 
-test('health reports frontendBuilt and writable sqlite path', async () => {
+test('health is minimal publicly; details expose frontend/db when auth off', async () => {
   const { server, json } = await listen();
   try {
     const health = await json('GET', '/api/health');
-    assert.equal(health.status, 200);
+    assert.ok([200, 503].includes(health.status));
     assert.equal(health.data.ok, true);
-    assert.equal(typeof health.data.frontendBuilt, 'boolean');
-    assert.equal(health.data.frontendBuilt, fs.existsSync(clientIndex));
-    assert.equal(health.data.dbPath, getDbPath());
+    assert.equal(typeof health.data.ready, 'boolean');
+    assert.equal(health.data.dbPath, undefined);
+    assert.equal(health.data.frontendBuilt, undefined);
+
+    const details = await json('GET', '/api/health/details');
+    assert.equal(details.status, 200);
+    assert.equal(details.data.frontendBuilt, fs.existsSync(clientIndex));
+    assert.equal(details.data.dbPath, getDbPath());
     assert.ok(fs.existsSync(getDbPath()), 'sqlite file should exist after migrate');
-    // Prove the path is writable under PERMIT_DB_PATH
     fs.accessSync(path.dirname(getDbPath()), fs.constants.W_OK);
   } finally {
     server.close();

@@ -4,10 +4,36 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const dataDir = path.join(__dirname, '..', 'data');
-const dbPath = process.env.PERMIT_DB_PATH || path.join(dataDir, 'permit-tracker.sqlite');
+const defaultDataDir = path.join(__dirname, '..', 'data');
 
-if (!fs.existsSync(dataDir)) fs.mkdirSync(dataDir, { recursive: true });
+/**
+ * Resolve SQLite path once. PERMIT_DB_PATH wins when set (absolute or relative to cwd).
+ * Never silently falls back to another file if the configured path is unusable.
+ */
+function resolveDbPath() {
+  if (process.env.PERMIT_DB_PATH) {
+    return path.resolve(process.env.PERMIT_DB_PATH);
+  }
+  return path.join(defaultDataDir, 'permit-tracker.sqlite');
+}
+
+function ensureParentWritable(filePath) {
+  const parent = path.dirname(filePath);
+  try {
+    fs.mkdirSync(parent, { recursive: true });
+    fs.accessSync(parent, fs.constants.W_OK);
+  } catch (e) {
+    const err = new Error(
+      `Cannot use SQLite path "${filePath}": parent directory "${parent}" is missing or not writable (${e.message}). ` +
+        `Set PERMIT_DB_PATH to a writable location. Refusing to open or switch databases.`
+    );
+    err.code = 'PERMIT_DB_UNWRITABLE';
+    throw err;
+  }
+}
+
+const dbPath = resolveDbPath();
+ensureParentWritable(dbPath);
 
 export const db = new Database(dbPath);
 db.pragma('journal_mode = WAL');
@@ -19,6 +45,16 @@ export function getDbPath() {
 
 export function getDataDir() {
   return path.dirname(dbPath);
+}
+
+/** Lightweight readiness probe — does not expose the path. */
+export function dbIsReady() {
+  try {
+    db.prepare('SELECT 1 AS ok').get();
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function addColumn(table, column, ddl) {

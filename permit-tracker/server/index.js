@@ -5,7 +5,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fileURLToPath } from 'node:url';
-import { db, getSetting, setSetting, recordChange, migrate, getDbPath } from './db.js';
+import { db, getSetting, setSetting, recordChange, migrate, getDbPath, dbIsReady } from './db.js';
 import { listConnectors, FAIRFAX_FIELD_AVAILABILITY } from './connectors/index.js';
 import {
   syncPermitById,
@@ -78,7 +78,7 @@ import {
   protectStateChange,
   authEnabled,
   authStatus,
-  bootstrapOwnerFromEnv,
+  assertPilotAuthConfig,
   login,
   logout,
   acceptInvite,
@@ -86,6 +86,10 @@ import {
   publicUser,
   serializeCookie,
   clearCookie,
+  assertLoginAllowed,
+  recordLoginFailure,
+  clearLoginFailures,
+  loginThrottleKey,
   COOKIE_NAME,
 } from './auth.js';
 import XLSX from 'xlsx';
@@ -104,7 +108,18 @@ const SOURCE_WORKBOOK =
   '';
 
 migrate();
-bootstrapOwnerFromEnv();
+let authConfig;
+try {
+  authConfig = assertPilotAuthConfig();
+} catch (e) {
+  if (process.env.PERMIT_NO_LISTEN === '1') {
+    // Tests may import the app without pilot bootstrap; surface via readiness later.
+    authConfig = { ok: false, mode: 'config_error', error: String(e.message || e) };
+  } else {
+    console.error(`Permit Ledger auth config error: ${e.message || e}`);
+    process.exit(1);
+  }
+}
 ensureSourceRegistrySeeded();
 // Clean deploy: do NOT auto-seed from /cursor/stores. Only seed when a workbook path
 // is configured and present, or PERMIT_DEMO=1 requests the isolated probe.
@@ -117,14 +132,25 @@ if (autoSeed && db.prepare('SELECT COUNT(*) AS c FROM community_sections').get()
 }
 
 const app = express();
-app.use(cors({ origin: true, credentials: true }));
+// Same-origin deploy: when auth is on, do not reflect arbitrary Origins (credentials).
+app.use(
+  cors({
+    origin(origin, callback) {
+      if (!authEnabled()) return callback(null, true);
+      if (!origin) return callback(null, true);
+      // Cross-origin credentialed access is not part of the private trial packaging.
+      return callback(null, false);
+    },
+    credentials: true,
+  })
+);
 app.use(express.json({ limit: '4mb' }));
 app.use(attachAuth);
 app.use((req, res, next) => {
   requestActor.run({ actor: req.actor }, next);
 });
 app.use(protectStateChange);
-// Invite-only when PILOT_AUTH=1 — health + auth endpoints stay public.
+// Invite-only when auth on — public health + auth endpoints stay reachable.
 app.use('/api', (req, res, next) => {
   if (req.path === '/health' || req.path.startsWith('/auth')) return next();
   return requireAuth(req, res, next);
@@ -145,19 +171,36 @@ const PERMIT_SQL = `SELECT p.*,
   JOIN community_sections cs ON cs.id = lg.section_id`;
 
 app.get('/api/health', (_req, res) => {
+  const processOk = true;
+  const dbOk = dbIsReady();
+  const built = frontendBuilt();
+  const authOk = !authEnabled() || authConfig?.ok !== false;
+  const ready = processOk && dbOk && built && authOk;
+  // Public health is minimal — no filesystem paths or detailed config.
+  res.status(ready ? 200 : 503).json({
+    ok: processOk,
+    ready,
+    service: 'permit-ledger',
+  });
+});
+
+app.get('/api/health/details', requireAuth, requireOwner, (_req, res) => {
   const built = frontendBuilt();
   res.json({
     ok: true,
+    ready: dbIsReady() && built && (!authEnabled() || authConfig?.ok !== false),
     service: 'permit-ledger',
     mode: 'workbook-native-prototype',
     auth: authEnabled(),
+    authConfigMode: authConfig?.mode || null,
     dbPathConfigured: Boolean(process.env.PERMIT_DB_PATH),
     dbPath: getDbPath(),
+    dbReady: dbIsReady(),
     frontendBuilt: built,
     clientDist: 'client/dist',
     diagnostic: built
       ? null
-      : 'Frontend assets missing: run `npm run build` so client/dist/index.html exists before start. API may still respond.',
+      : 'Frontend assets missing: run `npm run build` so client/dist/index.html exists before start.',
   });
 });
 
@@ -169,12 +212,20 @@ app.get('/api/auth/status', (req, res) => {
 });
 
 app.post('/api/auth/login', (req, res) => {
+  const email = req.body?.email;
+  const key = loginThrottleKey(email, req.ip || req.socket?.remoteAddress || '');
   try {
-    const result = login(req.body?.email, req.body?.password);
+    assertLoginAllowed(key);
+    const result = login(email, req.body?.password);
+    clearLoginFailures(key);
     const secure = process.env.COOKIE_SECURE === '1' || req.secure;
     res.setHeader('Set-Cookie', serializeCookie(result.token, { secure }));
     res.json({ user: result.user, expires_at: result.expires_at });
   } catch (e) {
+    if (e.code === 'LOGIN_THROTTLED') {
+      return res.status(429).json({ error: String(e.message || e) });
+    }
+    recordLoginFailure(key);
     res.status(401).json({ error: String(e.message || e) });
   }
 });
@@ -1352,7 +1403,7 @@ if (frontendBuilt()) {
   <h1>Frontend assets missing</h1>
   <p>The API process is running, but <code>client/dist/index.html</code> was not found.</p>
   <p>On Hostinger / production hosts, ensure the build step runs <code>npm run build</code> after install so Vite writes <code>client/dist</code> into the deploy package, then restart.</p>
-  <p>Check <code>GET /api/health</code> — <code>frontendBuilt</code> should be <code>true</code>.</p>
+  <p>Check <code>GET /api/health</code> (<code>ready</code>) and owner <code>GET /api/health/details</code>.</p>
 </body></html>`);
   });
 }

@@ -535,11 +535,15 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (authGate?.enabled && !authGate?.user) return;
+    // Wait for auth bootstrap; when invite-only, do not hit protected APIs until signed in.
+    if (authGate === null) return;
+    if (authGate.enabled && !authGate.user) return;
     refreshLists().catch((e) => setMessage(String(e.message || e)));
   }, [q, filters, sort, authGate]);
 
   useEffect(() => {
+    if (authGate === null) return;
+    if (authGate?.enabled && !authGate?.user) return;
     if (tab === 'attention') {
       Promise.all([api('/api/attention'), api('/api/schedule/preview'), api('/api/conflicts')]).then(
         ([a, s, c]) => {
@@ -552,7 +556,7 @@ export default function App() {
     if (tab === 'sources') {
       api('/api/sources').then((d) => setSources(d.sources || []));
     }
-  }, [tab]);
+  }, [tab, authGate]);
 
   async function runConnectLocation() {
     setBusy(true);

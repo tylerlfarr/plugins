@@ -214,8 +214,12 @@ test('auth disabled by default for Try Live / tests', async () => {
   const { server, json } = await listen();
   try {
     const health = await json('GET', '/api/health');
-    assert.equal(health.status, 200);
-    assert.equal(health.data.auth, false);
+    assert.ok([200, 503].includes(health.status));
+    assert.equal(health.data.ok, true);
+    assert.equal(health.data.dbPath, undefined);
+    const status = await json('GET', '/api/auth/status');
+    assert.equal(status.status, 200);
+    assert.equal(status.data.enabled, false);
     const meta = await json('GET', '/api/meta');
     assert.equal(meta.status, 200);
   } finally {

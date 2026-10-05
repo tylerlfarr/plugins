@@ -5,7 +5,7 @@ Temporary product name: **Permit Ledger**. Single-business invite-only trial.
 **Do not** purchase services or deploy externally without owner authorization.  
 **Never** commit passwords, API tokens, or invite tokens to git / PR bodies.
 
-Pinned code tip verified for this guide: see PR #1 tip (deploy config dry-run matched `6960933…` + follow-up config doc commits).
+Pinned code tip: see PR #1 (Dockerfile uses **Node 22** + `npm ci` lockfile; auth fail-closed). Hostinger guide: [`hostinger.md`](hostinger.md).
 
 ## Why Fly.io
 
