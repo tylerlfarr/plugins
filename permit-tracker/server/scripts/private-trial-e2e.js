@@ -115,7 +115,11 @@ async function runSession() {
   const { child, getOutput } = startServer({ includeOwnerBootstrap: true });
   try {
     const health = await waitReady(base);
-    log('process health', health.ok === true, JSON.stringify(health));
+    log(
+      'process health + release id',
+      health.ok === true && Boolean(health.release?.gitShaShort || health.release?.version),
+      JSON.stringify(health)
+    );
 
     const unauth = await api(base, 'GET', '/api/meta');
     log('API fail-closed without session', unauth.status === 401);
@@ -208,6 +212,29 @@ async function runSession() {
         cookie: ownerCookie,
       });
       log(`filter use=${use}`, filtered.status === 200, `n=${filtered.data.permits?.length ?? 'err'}`);
+    }
+
+    const unknownList = await api(base, 'GET', '/api/permits?use_classification=unknown', {
+      cookie: ownerCookie,
+    });
+    const unknownIds = new Set((unknownList.data.permits || []).map((p) => p.id));
+    const expFiltered = await fetch(`${base}/api/export.xlsx?use_classification=unknown`, {
+      headers: { Cookie: ownerCookie, 'X-Requested-With': 'PermitLedger', Origin: base },
+    });
+    const expFilteredBuf = Buffer.from(await expFiltered.arrayBuffer());
+    try {
+      const { inspectExportBuffer } = await import('../excelExport.js');
+      const inspected = inspectExportBuffer(expFilteredBuf);
+      const exportAgrees =
+        inspected.permits.length === unknownIds.size &&
+        inspected.permits.every((p) => unknownIds.has(p.id));
+      log(
+        'export agrees with use=unknown filter',
+        exportAgrees,
+        `list=${unknownIds.size} exportRows=${inspected.permits.length} contactOrigins=${(inspected.contactOrigins || []).join(',') || 'none'}`
+      );
+    } catch (e) {
+      log('export agrees with use=unknown filter', false, String(e.message || e));
     }
 
     const sync = await api(base, 'POST', `/api/sync/${first.id}`, { cookie: ownerCookie, body: {} });

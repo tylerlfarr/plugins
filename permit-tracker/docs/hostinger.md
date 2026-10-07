@@ -14,6 +14,11 @@ Official references:
 
 **Hostinger deploy and DB persistence are not verified in this repository work.** After a successful local Node 22 build, if Hostinger fails, paste the **raw deployment log** — do not invent a diagnosis.
 
+Identify the running build without guessing: `GET /api/health` includes `release.version` + `release.gitShaShort` (full SHA + `builtAt` on owner `/api/health/details`).
+
+Persistence gate (restart + redeploy, no DB reset): [`hostinger-persistence-checklist.md`](hostinger-persistence-checklist.md).  
+Operator timed trial (5–10 records): [`operator-trial-script.md`](operator-trial-script.md).
+
 ## Exact field values
 
 | Field | Value |
@@ -22,8 +27,8 @@ Official references:
 | **Framework preset** | **Express.js** (fallback: **Other**) |
 | **Node.js version** | **22** |
 | **Package manager** | **npm** (committed `package-lock.json`) |
-| **Install** | Platform default (`npm install` / lockfile-aware). Do **not** omit-dev if optional — Vite/React are in `dependencies` so production install can still `npm run build`. |
-| **Build command** | `npm run build` |
+| **Install** | Platform default (`npm install` / lockfile-aware). `postinstall` runs `npm run build` so install alone produces `client/dist` when the full app tree is present. Do **not** omit-dev if optional — Vite/React are in `dependencies`. |
+| **Build command** | `npm run build` (optional if postinstall already built; keep set as a safety net) |
 | **Entry file** | `server/index.js` |
 | **Output directory** | `client/dist` |
 | **Start** | `npm start` if offered; else entry file. `start` runs `NODE_ENV=production node server/index.js`. |

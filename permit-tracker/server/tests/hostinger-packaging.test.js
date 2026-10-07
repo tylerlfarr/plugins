@@ -83,6 +83,8 @@ test('health is minimal publicly; details expose frontend/db when auth off', asy
     assert.ok([200, 503].includes(health.status));
     assert.equal(health.data.ok, true);
     assert.equal(typeof health.data.ready, 'boolean');
+    assert.equal(typeof health.data.release?.gitShaShort, 'string');
+    assert.equal(typeof health.data.release?.version, 'string');
     assert.equal(health.data.dbPath, undefined);
     assert.equal(health.data.frontendBuilt, undefined);
 

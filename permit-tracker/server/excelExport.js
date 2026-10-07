@@ -222,12 +222,18 @@ export function exportCoexistenceXlsx({
 export function inspectExportBuffer(buf) {
   const wb = XLSX.read(buf, { type: 'buffer' });
   const contacts = XLSX.utils.sheet_to_json(wb.Sheets.Contacts || {});
+  const permitRows = XLSX.utils.sheet_to_json(wb.Sheets['Permit Tracker Export'] || {});
+  const permits = permitRows.map((r) => ({
+    id: Number(r.permit_record_id),
+    use_classification: r.use_classification,
+  }));
   return {
     sheetNames: wb.SheetNames,
     contactCount: contacts.length,
     contactStatuses: [...new Set(contacts.map((c) => c.status))],
     contactOrigins: [...new Set(contacts.map((c) => c.record_origin))],
     contacts,
+    permits,
     propertyCount: XLSX.utils.sheet_to_json(wb.Sheets.Properties || {}).length,
   };
 }

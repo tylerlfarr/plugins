@@ -102,6 +102,43 @@ const frontendBuilt = () => fs.existsSync(clientIndex);
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
 const requestActor = new AsyncLocalStorage();
 
+function readReleaseInfo() {
+  const candidates = [
+    path.join(__dirname, 'release-info.json'),
+    path.join(root, 'server', 'release-info.json'),
+  ];
+  for (const file of candidates) {
+    try {
+      if (!fs.existsSync(file)) continue;
+      const raw = JSON.parse(fs.readFileSync(file, 'utf8'));
+      return {
+        version: String(raw.version || '0.0.0'),
+        gitSha: String(raw.gitSha || 'unknown'),
+        gitShaShort: String(raw.gitShaShort || (raw.gitSha || 'unknown').toString().slice(0, 7)),
+        builtAt: raw.builtAt || null,
+      };
+    } catch {
+      /* try next */
+    }
+  }
+  let pkgVersion = '0.0.0';
+  try {
+    pkgVersion = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8')).version || '0.0.0';
+  } catch {
+    /* ignore */
+  }
+  const envSha =
+    process.env.SOURCE_COMMIT || process.env.GITHUB_SHA || process.env.GIT_SHA || 'unknown';
+  return {
+    version: pkgVersion,
+    gitSha: envSha,
+    gitShaShort: envSha === 'unknown' ? 'unknown' : String(envSha).slice(0, 7),
+    builtAt: null,
+  };
+}
+
+const releaseInfo = readReleaseInfo();
+
 const SOURCE_WORKBOOK =
   process.env.SOURCE_WORKBOOK_XLSX ||
   process.env.GOSPEL_XLSX ||
@@ -176,11 +213,15 @@ app.get('/api/health', (_req, res) => {
   const built = frontendBuilt();
   const authOk = !authEnabled() || authConfig?.ok !== false;
   const ready = processOk && dbOk && built && authOk;
-  // Public health is minimal — no filesystem paths or detailed config.
+  // Public health stays lean — release id only (no paths/secrets) to identify Hostinger builds.
   res.status(ready ? 200 : 503).json({
     ok: processOk,
     ready,
     service: 'permit-ledger',
+    release: {
+      version: releaseInfo.version,
+      gitShaShort: releaseInfo.gitShaShort,
+    },
   });
 });
 
@@ -191,6 +232,7 @@ app.get('/api/health/details', requireAuth, requireOwner, (_req, res) => {
     ready: dbIsReady() && built && (!authEnabled() || authConfig?.ok !== false),
     service: 'permit-ledger',
     mode: 'workbook-native-prototype',
+    release: releaseInfo,
     auth: authEnabled(),
     authConfigMode: authConfig?.mode || null,
     dbPathConfigured: Boolean(process.env.PERMIT_DB_PATH),

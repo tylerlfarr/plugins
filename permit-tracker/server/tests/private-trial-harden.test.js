@@ -91,6 +91,7 @@ test('public health is minimal; details require owner', async () => {
     assert.equal(health.data.ok, true);
     assert.equal(typeof health.data.ready, 'boolean');
     assert.equal(health.data.service, 'permit-ledger');
+    assert.equal(typeof health.data.release?.gitShaShort, 'string');
     assert.equal(health.data.dbPath, undefined);
     assert.equal(health.data.frontendBuilt, undefined);
     assert.equal(health.data.diagnostic, undefined);
@@ -104,6 +105,7 @@ test('public health is minimal; details require owner', async () => {
     assert.equal(details.data.dbPath, getDbPath());
     assert.equal(typeof details.data.frontendBuilt, 'boolean');
     assert.equal(details.data.auth, true);
+    assert.ok(details.data.release?.version);
   } finally {
     client.server.close();
   }
