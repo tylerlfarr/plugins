@@ -12,6 +12,7 @@
     "dev:server": "node --watch server/index.js",
     "dev:client": "vite --config client/vite.config.js",
     "build": "vite build --config client/vite.config.js",
+    "postinstall": "npm run build",
     "start": "NODE_ENV=production node server/index.js",
     "seed": "node server/seed.js",
     "seed:demo": "PERMIT_DEMO=1 node server/seed.js --demo",
