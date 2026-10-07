@@ -54,6 +54,7 @@ async function withServer(envExtra, fn) {
       TRACERFY_MODE: 'local_fixture',
       // Enforce eligibility in these tests unless overridden
       PERMIT_BYPASS_SOURCE_ELIGIBILITY: '0',
+      PERMIT_TEST_HARNESS: '1',
       ...envExtra,
     },
     stdio: 'ignore',
@@ -182,7 +183,7 @@ test('source eligibility blocks live check until activated + confirmed', async (
       cookie,
       body: {
         jurisdiction_confirmed: true,
-        expected_updated_at: detail.data.permit.updated_at,
+        expected_row_version: detail.data.permit.row_version,
       },
     });
     const stillBlocked = await api(base, 'POST', `/api/sync/${ffx.id}`, { cookie, body: {} });

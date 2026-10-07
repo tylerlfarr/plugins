@@ -24,7 +24,20 @@ Owner login → `GET /api/health/details` also returns full `release` + `dbPath`
 3. Record **`dbPath`** exactly (absolute or relative).
 4. In hPanel / File Manager, locate that file if visible. Note whether it sits under a deploy-managed tree (`hbuilds/…`, `nodejs/…`) that is overwritten on deploy.
 
-If the path is inside a build output directory that Hostinger replaces on each deploy, **stop** — set `PERMIT_DB_PATH` to a durable location Hostinger documents as persistent, then restart **once**, and re-check `dbPath` before any import.
+### Known Hostinger observation (retest)
+
+SQLite has been observed under:
+
+`hbuilds/versions/<deployment>/nodejs/data`
+
+That path is **release-scoped**. A new Hostinger Node deploy can create a new `versions/<id>/` tree, so the prior SQLite may **not** follow the new release unless you:
+
+- Set `PERMIT_DB_PATH` to a **durable** absolute path outside `hbuilds/versions/…` (Hostinger-documented persistent data directory or volume), **or**
+- After each deploy, manually copy the previous `.sqlite` (+ `-wal`/`-shm` if present) into the new tree (not preferred).
+
+**Do not assume** generic Hostinger “database backups” cover this SQLite file — those typically mean MySQL/Postgres, not the Node app’s file.
+
+If the path is inside a build output directory that Hostinger replaces on each deploy, **stop** — set `PERMIT_DB_PATH` to a durable location Hostinger documents as persistent, then restart **once**, and re-check `dbPath` before any import. This agent does **not** reset, move, or redeploy the hosted database.
 
 ## 2) Backup / recovery method (confirm before redeploy)
 

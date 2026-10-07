@@ -10,6 +10,7 @@ import {
 } from './ids.js';
 import { confirmJurisdictionFromHeaders, ARCHIVED_SHEETS } from './importProfile.js';
 import { rebuildAllReadiness } from './readiness.js';
+import { bumpPermitRowVersion } from './rowVersion.js';
 
 export { extractOfficialIds, normalizeOfficialId, suggestJurisdictionFromId, stableLotKey };
 
@@ -580,6 +581,7 @@ export function commitWorkbookParse(parsed, { changedBy, replaceSecondary = true
           permit.id
         );
         recordChange(permit.id, 'lot_group_id', String(permit.lot_group_id), String(lotId), user, 'import');
+        bumpPermitRowVersion(permit.id);
         permit = db.prepare('SELECT * FROM permit_records WHERE id = ?').get(permit.id);
       }
 
@@ -605,6 +607,7 @@ export function commitWorkbookParse(parsed, { changedBy, replaceSecondary = true
         permit = db.prepare('SELECT * FROM permit_records WHERE id = ?').get(permitId);
       } else {
         summary.permits_updated += 1;
+        let importTouched = false;
         // Update jurisdiction only if newly confirmed
         if (row.jurisdiction_confirmed && !permit.jurisdiction_confirmed) {
           recordChange(
@@ -619,6 +622,7 @@ export function commitWorkbookParse(parsed, { changedBy, replaceSecondary = true
             `UPDATE permit_records SET jurisdiction_code = ?, jurisdiction_source = ?,
              jurisdiction_confirmed = 1, updated_at = datetime('now') WHERE id = ?`
           ).run(row.jurisdiction_code, row.jurisdiction_source, permit.id);
+          importTouched = true;
         }
         // Attaching/correcting primary ID on existing shell
         if (
@@ -631,8 +635,12 @@ export function commitWorkbookParse(parsed, { changedBy, replaceSecondary = true
             db.prepare(
               `UPDATE permit_records SET primary_official_id = ?, updated_at = datetime('now') WHERE id = ?`
             ).run(row.primary_official_id, permit.id);
+            importTouched = true;
           }
         }
+        // Always bump on re-import touch so open editors cannot overwrite with stale milestone saves.
+        bumpPermitRowVersion(permit.id);
+        void importTouched;
       }
 
       // Sync official IDs for this permit record.

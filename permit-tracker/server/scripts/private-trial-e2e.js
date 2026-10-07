@@ -43,6 +43,7 @@ function startServer({ includeOwnerBootstrap = true } = {}) {
     LISTEN_HOST: '127.0.0.1',
     PORT: String(port),
     TRACERFY_MODE: 'local_fixture',
+    PERMIT_TEST_HARNESS: '1',
   };
   delete env.TRACERFY_API_TOKEN;
   if (includeOwnerBootstrap) {
@@ -185,13 +186,19 @@ async function runSession() {
     if (!first) throw new Error('no permits after import');
 
     const milestoneKey = 'e2e_keep_me';
+    const beforeEdit = await api(base, 'GET', `/api/permits/${first.id}`, { cookie: ownerCookie });
     const edited = await api(base, 'PATCH', `/api/permits/${first.id}`, {
       cookie: ownerCookie,
       body: {
         milestones: [{ key: milestoneKey, label: 'E2E Keep', value: 'survive-reimport' }],
+        expected_row_version: beforeEdit.data.permit?.row_version ?? 1,
       },
     });
-    log('edit milestone', edited.status === 200);
+    log(
+      'edit milestone',
+      edited.status === 200,
+      edited.status !== 200 ? JSON.stringify(edited.data).slice(0, 200) : ''
+    );
 
     const reFd = new FormData();
     reFd.append('file', new Blob([buf]), 'sanitized.xlsx');

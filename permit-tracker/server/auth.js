@@ -91,6 +91,17 @@ function userCount() {
  * Returns { ok, mode } or throws Error with code PILOT_AUTH_CONFIG.
  */
 export function assertPilotAuthConfig() {
+  if (
+    process.env.NODE_ENV === 'production' &&
+    process.env.PERMIT_BYPASS_SOURCE_ELIGIBILITY === '1' &&
+    process.env.PERMIT_TEST_HARNESS !== '1'
+  ) {
+    const err = new Error(
+      'PERMIT_BYPASS_SOURCE_ELIGIBILITY=1 is not allowed in production. Remove the bypass for hosted/pilot runs.'
+    );
+    err.code = 'PILOT_AUTH_CONFIG';
+    throw err;
+  }
   if (!authEnabled()) return { ok: true, mode: 'auth_disabled' };
   ensureAuthTables();
   const count = userCount();

@@ -44,6 +44,9 @@ export default function App() {
   const [sort, setSort] = useState({ key: 'updated_at', dir: 'desc' });
   const [selected, setSelected] = useState(new Set());
   const [detail, setDetail] = useState(null);
+  /** Last clean server copy — drafts live in `detail`; never auto-overwrite with server on conflict. */
+  const [detailServer, setDetailServer] = useState(null);
+  const [detailConflict, setDetailConflict] = useState(null); // { server, draft, reason }
   const [milestones, setMilestones] = useState([]);
   const [officialIds, setOfficialIds] = useState([]);
   const [history, setHistory] = useState([]);
@@ -161,6 +164,8 @@ export default function App() {
     // Ignore out-of-order responses
     if (requestId !== detailRequestSeq.current) return;
     setDetail(data.permit);
+    setDetailServer(data.permit);
+    setDetailConflict(null);
     setMilestones(data.milestones);
     setOfficialIds(data.officialIds);
     setHistory(data.history);
@@ -482,15 +487,22 @@ export default function App() {
     if (!detail) return;
     setBusy(true);
     try {
-      await api(`/api/permits/${detail.id}`, {
+      const data = await api(`/api/permits/${detail.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ milestones: [{ key: m.key, clear: true }] }),
+        body: JSON.stringify({
+          milestones: [{ key: m.key, clear: true }],
+          expected_row_version: detail.row_version ?? 1,
+        }),
       });
       setMessage(`Cleared milestone ${m.key} (audited)`);
+      if (data.permit) {
+        setDetail(data.permit);
+        setDetailServer(data.permit);
+      }
       await openDetail(detail.id);
     } catch (e) {
-      setMessage(String(e.message || e));
+      handleStaleSave(e);
     } finally {
       setBusy(false);
     }
@@ -505,19 +517,49 @@ export default function App() {
     if (detail) await openDetail(detail.id);
   }
 
+  function handleStaleSave(e) {
+    if (e.status === 409 || e.body?.error === 'stale_write') {
+      const server = e.body?.permit;
+      setDetailConflict({
+        server,
+        draft: detail,
+        reason: e.body?.message || 'Server copy changed; draft kept — reload deliberately.',
+      });
+      setMessage(
+        e.body?.message ||
+          'Stale save blocked. Your draft was kept; reload server values or keep editing, then save with the new version.'
+      );
+      return true;
+    }
+    if (e.body?.error === 'expected_row_version_required') {
+      setMessage(e.body?.message || 'Reload the permit detail before saving (version required).');
+      return true;
+    }
+    setMessage(String(e.message || e));
+    return false;
+  }
+
   async function saveMilestone(m, value) {
     if (!detail) return;
     setBusy(true);
     try {
-      await api(`/api/permits/${detail.id}`, {
+      const data = await api(`/api/permits/${detail.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           milestones: [{ key: m.key, label: m.label, value, value_kind: m.value_kind || 'text' }],
+          expected_row_version: detail.row_version ?? 1,
         }),
       });
+      if (data.permit) {
+        setDetail(data.permit);
+        setDetailServer(data.permit);
+        setDetailConflict(null);
+      }
       await openDetail(detail.id);
       await refreshLists();
+    } catch (e) {
+      handleStaleSave(e);
     } finally {
       setBusy(false);
     }
@@ -664,26 +706,16 @@ export default function App() {
         }),
       });
       setMessage('Saved.');
-      if (data.permit) setDetail(data.permit);
+      if (data.permit) {
+        setDetail(data.permit);
+        setDetailServer(data.permit);
+        setDetailConflict(null);
+      }
       await refreshLists();
       await openDetail(detail.id);
     } catch (e) {
-      if (e.status === 409 || e.body?.error === 'stale_write') {
-        const fresh = e.body?.permit;
-        setMessage(
-          e.body?.message ||
-            'Stale save blocked — this row changed (e.g. bulk update). Reloaded current values; re-apply your edits if still needed.'
-        );
-        if (fresh) {
-          setDetail(fresh);
-          await refreshLists();
-        } else {
-          await openDetail(detail.id);
-          await refreshLists();
-        }
-      } else {
-        setMessage(String(e.message || e));
-      }
+      handleStaleSave(e);
+      await refreshLists();
     } finally {
       setBusy(false);
     }
@@ -757,9 +789,28 @@ export default function App() {
     setSelected(new Set());
     setMessage(`Bulk updated ${data.changed ?? selectedIds.length} of ${selectedIds.length}.`);
     await refreshLists();
-    // Refresh open detail so a later Save cannot silently reverse the bulk write.
+    // Do not silently replace an unsaved draft. Surface conflict; require deliberate reload.
     if (detail?.id && selectedIds.includes(detail.id)) {
-      await openDetail(detail.id);
+      const serverRow = (data.permits || []).find((p) => p.id === detail.id);
+      const dirty =
+        detailServer &&
+        (detail.internal_status !== detailServer.internal_status ||
+          detail.owner !== detailServer.owner ||
+          detail.next_action !== detailServer.next_action ||
+          detail.jurisdiction_code !== detailServer.jurisdiction_code ||
+          Boolean(detail.jurisdiction_confirmed) !== Boolean(detailServer.jurisdiction_confirmed));
+      if (dirty && serverRow) {
+        setDetailConflict({
+          server: serverRow,
+          draft: detail,
+          reason: 'Bulk update changed this row while you had unsaved edits. Draft kept.',
+        });
+        setMessage(
+          'Bulk updated selection. Open detail has unsaved edits — draft kept. Reload server values or keep editing, then Save.'
+        );
+      } else {
+        await openDetail(detail.id);
+      }
     }
   }
 
@@ -909,10 +960,51 @@ export default function App() {
       </header>
 
       <div className="banner">
-        Trial path: Import workbook → confirm property → retrieve supported official info → optional
-        contacts → review → export → Attention. Building use filter is separate from work type;
-        Unknown when the official label does not state residential/commercial.
+        Operator path: <strong>Import</strong> workbook → <strong>Resolve</strong> missing property /
+        jurisdiction inputs → <strong>Check</strong> eligible records (activated source + confirmed
+        AHJ) → <strong>Review</strong> Attention / structured export. Owner source setup (activate
+        Fairfax PLUS) is separate. Building use ≠ work type.
       </div>
+      {detailConflict ? (
+        <div className="banner warn" role="alert">
+          Conflict: {detailConflict.reason} Server version{' '}
+          {detailConflict.server?.row_version ?? '—'} · your draft kept in the form.
+          <div className="empty-actions" style={{ marginTop: 8 }}>
+            <button
+              type="button"
+              className="btn"
+              onClick={async () => {
+                if (detailConflict.server?.id) await openDetail(detailConflict.server.id);
+                else setDetailConflict(null);
+              }}
+            >
+              Reload server values
+            </button>
+            <button
+              type="button"
+              className="btn primary"
+              onClick={() => {
+                // Keep draft; adopt server row_version only so a subsequent Save can be attempted
+                // after deliberate field merge by the operator — do not auto-apply draft onto server.
+                if (detailConflict.server && detail) {
+                  setDetail({
+                    ...detail,
+                    row_version: detailConflict.server.row_version,
+                    updated_at: detailConflict.server.updated_at,
+                  });
+                  setDetailServer(detailConflict.server);
+                }
+                setDetailConflict(null);
+                setMessage(
+                  'Draft kept with updated version token. Review fields against server before Save — Save will not auto-merge.'
+                );
+              }}
+            >
+              Keep editing draft
+            </button>
+          </div>
+        </div>
+      ) : null}
 
       <div className="banner warn">
         Fairfax County = live GIS reads (issued-heavy; no pending/comments/holds/inspections).
@@ -1111,10 +1203,10 @@ export default function App() {
               className="btn"
               href={`/api/export.xlsx?${new URLSearchParams(
                 Object.fromEntries(
-                  Object.entries(filters).filter(([, v]) => v != null && String(v) !== '')
+                  Object.entries({ q, ...filters }).filter(([, v]) => v != null && String(v) !== '')
                 )
               )}`}
-              title="Confirmed contacts only; sandbox/rejected excluded. Honors current use/location/status filters."
+              title="Filtered-row export: same q + filters as the table (exact ID agreement). Confirmed contacts only."
             >
               Structured export
             </a>
@@ -1123,13 +1215,27 @@ export default function App() {
               href={`/api/export.xlsx?${new URLSearchParams({
                 includeReviewed: '1',
                 ...Object.fromEntries(
-                  Object.entries(filters).filter(([, v]) => v != null && String(v) !== '')
+                  Object.entries({ q, ...filters }).filter(([, v]) => v != null && String(v) !== '')
                 ),
               })}`}
-              title="Confirmed + reviewed candidates. Honors current use/location/status filters."
+              title="Filtered-row export + reviewed contact candidates. Same q/filters as table."
             >
               Export + reviewed
             </a>
+            {selectedIds.length ? (
+              <a
+                className="btn"
+                href={`/api/export.xlsx?${new URLSearchParams({
+                  selectedIds: selectedIds.join(','),
+                  ...Object.fromEntries(
+                    Object.entries({ q, ...filters }).filter(([, v]) => v != null && String(v) !== '')
+                  ),
+                })}`}
+                title="Selected-row export: only checked rows (still import-origin). Distinct from filtered-row export."
+              >
+                Export selected ({selectedIds.length})
+              </a>
+            ) : null}
             <button
               type="button"
               className="btn primary"

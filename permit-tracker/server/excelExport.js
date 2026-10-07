@@ -1,5 +1,6 @@
 import XLSX from 'xlsx';
 import { db } from './db.js';
+import { buildPermitFilterClause, hasActivePermitFilters } from './permitFilters.js';
 
 const PERMIT_EXPORT_HEADERS = [
   'permit_record_id',
@@ -73,37 +74,27 @@ export function exportCoexistenceXlsx({
   contactStatuses = ['confirmed'],
   includeReviewedCandidates = false,
   filters = {},
+  selectedIds = null,
 } = {}) {
   const statuses = includeReviewedCandidates
     ? [...new Set([...contactStatuses, 'candidate'])]
     : contactStatuses;
 
-  let where = `p.record_origin = 'import'`;
-  const params = [];
-  if (filters.use_classification) {
-    where += ' AND p.use_classification = ?';
-    params.push(String(filters.use_classification));
-  }
-  if (filters.jurisdiction_code) {
-    where += ' AND p.jurisdiction_code = ?';
-    params.push(String(filters.jurisdiction_code));
-  }
-  if (filters.internal_status) {
-    where += ' AND p.internal_status = ?';
-    params.push(String(filters.internal_status));
-  }
-  if (filters.official_status) {
-    where += ' AND p.official_status = ?';
-    params.push(String(filters.official_status));
-  }
-  if (filters.readiness_state) {
-    where += ' AND p.readiness_state = ?';
-    params.push(String(filters.readiness_state));
-  }
-  if (filters.approaching_start === 'true' || filters.approaching_start === true) {
-    where += ` AND ra.target_start IS NOT NULL AND ra.days_to_start IS NOT NULL
-               AND ra.days_to_start >= 0 AND ra.days_to_start <= 45`;
-  }
+  const selected =
+    selectedIds == null
+      ? null
+      : Array.isArray(selectedIds)
+        ? selectedIds.map(Number).filter((n) => Number.isFinite(n))
+        : String(selectedIds)
+            .split(',')
+            .map((s) => Number(s.trim()))
+            .filter((n) => Number.isFinite(n));
+
+  const { sql: filterSql, params } = buildPermitFilterClause(filters, {
+    selectedIds: selected,
+  });
+  // buildPermitFilterClause already includes record_origin = import unless include_demo
+  const where = `1=1${filterSql}`;
 
   const permitRows = db
     .prepare(
@@ -153,8 +144,9 @@ export function exportCoexistenceXlsx({
     .all(...params);
 
   const permitIdSet = new Set(permitRows.map((r) => r.permit_record_id));
-  const filtered = permitIdSet.size > 0;
+  const scoped = permitIdSet.size > 0 || hasActivePermitFilters(filters) || (selected && selected.length >= 0);
   const idList = [...permitIdSet];
+  const filtered = scoped;
 
   const milestoneStmt = db.prepare(
     `SELECT key, label, value, value_kind FROM internal_milestones WHERE permit_record_id = ? ORDER BY key`

@@ -29,6 +29,8 @@ import {
   isFairfaxShapedId,
 } from './workbookImport.js';
 import { exportCoexistenceXlsx } from './excelExport.js';
+import { buildPermitFilterClause, normalizePermitFilters } from './permitFilters.js';
+import { claimPermitWrite, bumpPermitRowVersion } from './rowVersion.js';
 import { seed } from './seed.js';
 import {
   ensureSourceRegistrySeeded,
@@ -398,23 +400,7 @@ app.get('/api/sections', (_req, res) => {
 });
 
 app.get('/api/permits', (req, res) => {
-  const {
-    q,
-    jurisdiction_code,
-    official_status,
-    internal_status,
-    readiness_state,
-    approaching_start,
-    missing_property,
-    contacts_available,
-    contact_review_needed,
-    has_official_id,
-    fairfax_shaped,
-    use_classification,
-    include_demo,
-    sort = 'updated_at',
-    dir = 'desc',
-  } = req.query;
+  const { sort = 'updated_at', dir = 'desc', ...filterQuery } = req.query;
   const allowed = new Set([
     'updated_at',
     'community_name',
@@ -428,6 +414,7 @@ app.get('/api/permits', (req, res) => {
   ]);
   const sortCol = allowed.has(String(sort)) ? String(sort) : 'updated_at';
   const sortDir = String(dir).toLowerCase() === 'asc' ? 'ASC' : 'DESC';
+  const { sql: filterSql, params, filters: appliedFilters } = buildPermitFilterClause(filterQuery);
   let sql = `SELECT p.*,
     lg.lot_label, lg.housetype, lg.notes_raw, lg.section_id,
     cs.project_code, cs.community_name, cs.permit_time_note, cs.jurisdiction_code AS section_jurisdiction,
@@ -436,76 +423,7 @@ app.get('/api/permits', (req, res) => {
     JOIN lot_groups lg ON lg.id = p.lot_group_id
     JOIN community_sections cs ON cs.id = lg.section_id
     LEFT JOIN readiness_assessments ra ON ra.permit_record_id = p.id
-    WHERE 1=1`;
-  const params = [];
-  if (include_demo !== 'true') {
-    sql += ` AND p.record_origin = 'import'`;
-  }
-  if (q) {
-    sql += ` AND (
-      cs.community_name LIKE ? OR cs.project_code LIKE ? OR lg.lot_label LIKE ?
-      OR lg.housetype LIKE ? OR IFNULL(p.primary_official_id,'') LIKE ?
-      OR lg.notes_raw LIKE ? OR p.owner LIKE ?
-    )`;
-    const like = `%${q}%`;
-    params.push(like, like, like, like, like, like, like);
-  }
-  if (jurisdiction_code) {
-    sql += ' AND p.jurisdiction_code = ?';
-    params.push(jurisdiction_code);
-  }
-  if (official_status) {
-    sql += ' AND p.official_status = ?';
-    params.push(official_status);
-  }
-  if (internal_status) {
-    sql += ' AND p.internal_status = ?';
-    params.push(internal_status);
-  }
-  if (use_classification) {
-    sql += ' AND p.use_classification = ?';
-    params.push(use_classification);
-  }
-  if (readiness_state) {
-    sql += ' AND p.readiness_state = ?';
-    params.push(readiness_state);
-  }
-  if (approaching_start === 'true') {
-    sql += ` AND ra.target_start IS NOT NULL AND ra.days_to_start IS NOT NULL
-             AND ra.days_to_start >= 0 AND ra.days_to_start <= ?`;
-    params.push(Number(getReadinessRuleset().approachingStartDays || 45));
-  }
-  if (missing_property === 'true') {
-    sql += ` AND NOT EXISTS (
-      SELECT 1 FROM property_links pl
-      WHERE pl.lot_group_id = lg.id AND pl.link_state IN ('candidate','confirmed')
-    )`;
-  }
-  if (contacts_available === 'true') {
-    sql += ` AND EXISTS (
-      SELECT 1 FROM contacts c
-      WHERE c.lot_group_id = lg.id AND c.status IN ('candidate','confirmed')
-        AND c.record_origin != 'sandbox_demo'
-    )`;
-  }
-  if (contact_review_needed === 'true') {
-    sql += ` AND EXISTS (
-      SELECT 1 FROM contacts c
-      WHERE c.lot_group_id = lg.id AND c.status = 'candidate'
-        AND c.record_origin != 'sandbox_demo'
-    )`;
-  }
-  if (has_official_id === 'true') {
-    sql += ` AND p.primary_official_id IS NOT NULL AND p.primary_official_id != ''`;
-  }
-  if (fairfax_shaped === 'true') {
-    sql += ` AND (
-      p.primary_official_id GLOB 'ALTC-*'
-      OR p.primary_official_id GLOB 'ALTR-*'
-      OR p.primary_official_id GLOB 'BLDR-*'
-      OR p.primary_official_id GLOB 'BLDC-*'
-    )`;
-  }
+    WHERE 1=1${filterSql}`;
   const sortExpr =
     sortCol === 'community_name'
       ? 'cs.community_name'
@@ -517,6 +435,7 @@ app.get('/api/permits', (req, res) => {
     ...p,
     fairfax_shaped: p.primary_official_id ? isFairfaxShapedId(p.primary_official_id) : false,
   }));
+  void appliedFilters;
   res.json({ permits });
 });
 
@@ -592,9 +511,9 @@ app.get('/api/permits/:id', (req, res) => {
 });
 
 app.patch('/api/permits/:id', (req, res) => {
-  const permit = db.prepare('SELECT * FROM permit_records WHERE id = ?').get(Number(req.params.id));
-  if (!permit) return res.status(404).json({ error: 'Not found' });
-  // official_status + source_native_status are connector-owned (read-only via API)
+  const permitId = Number(req.params.id);
+  const existing = db.prepare('SELECT * FROM permit_records WHERE id = ?').get(permitId);
+  if (!existing) return res.status(404).json({ error: 'Not found' });
   const editable = [
     'primary_official_id',
     'jurisdiction_code',
@@ -610,115 +529,152 @@ app.patch('/api/permits/:id', (req, res) => {
       error: 'official_status and source_native_status are read-only (official connector fields)',
     });
   }
-  const expectedVersion =
-    req.body?.expected_row_version ?? req.body?.expected_updated_at /* legacy alias ignored for equality */;
   if (
-    req.body?.expected_row_version != null &&
-    Number(req.body.expected_row_version) !== Number(permit.row_version ?? 1)
+    req.body?.expected_row_version == null ||
+    req.body?.expected_row_version === '' ||
+    Number.isNaN(Number(req.body.expected_row_version))
   ) {
-    const fresh = db.prepare(`${PERMIT_SQL} WHERE p.id = ?`).get(permit.id);
-    return res.status(409).json({
-      error: 'stale_write',
+    return res.status(400).json({
+      error: 'expected_row_version_required',
       message:
-        'This permit changed since you opened it (e.g. a bulk update). Reload the detail and re-apply your edits.',
-      permit: fresh,
-      server_row_version: permit.row_version,
-      client_expected_row_version: req.body.expected_row_version,
-      server_updated_at: permit.updated_at,
+        'Save requires expected_row_version from the open detail. Reload the permit and try again.',
+      permit: db.prepare(`${PERMIT_SQL} WHERE p.id = ?`).get(permitId),
+      server_row_version: existing.row_version,
     });
   }
-  // Also accept expected_updated_at when row_version not sent (older clients): still detect
-  // bulk collisions when timestamps differ; same-second collisions require row_version.
-  if (
-    req.body?.expected_row_version == null &&
-    req.body?.expected_updated_at != null &&
-    String(req.body.expected_updated_at) !== '' &&
-    String(permit.updated_at) !== String(req.body.expected_updated_at)
-  ) {
-    const fresh = db.prepare(`${PERMIT_SQL} WHERE p.id = ?`).get(permit.id);
-    return res.status(409).json({
-      error: 'stale_write',
-      message:
-        'This permit changed since you opened it (e.g. a bulk update). Reload the detail and re-apply your edits.',
-      permit: fresh,
-      server_updated_at: permit.updated_at,
-      client_expected_updated_at: req.body.expected_updated_at,
-    });
-  }
-  void expectedVersion;
+
   const user = currentUser();
-  let mutated = false;
-  for (const key of editable) {
-    if (!(key in (req.body || {}))) continue;
-    let value = req.body[key];
-    if (value === '') value = ['next_action_due', 'primary_official_id'].includes(key) ? null : '';
-    if (String(permit[key] ?? '') === String(value ?? '')) continue;
-    recordChange(permit.id, key, permit[key], value, user, 'ui');
-    db.prepare(`UPDATE permit_records SET ${key} = ?, updated_at = datetime('now') WHERE id = ?`).run(
-      value,
-      permit.id
-    );
-    mutated = true;
-  }
-  // Operator confirmation of AHJ (required before operational live checks).
-  if ('jurisdiction_confirmed' in (req.body || {})) {
-    const next = req.body.jurisdiction_confirmed ? 1 : 0;
-    if (Number(permit.jurisdiction_confirmed) !== next) {
-      recordChange(permit.id, 'jurisdiction_confirmed', permit.jurisdiction_confirmed, next, user, 'ui');
-      db.prepare(
-        `UPDATE permit_records SET jurisdiction_confirmed = ?, jurisdiction_source = CASE
-           WHEN ? = 1 THEN 'operator_confirmed' ELSE jurisdiction_source END,
-         updated_at = datetime('now') WHERE id = ?`
-      ).run(next, next, permit.id);
-      mutated = true;
-    }
-  }
-  if (mutated) {
-    db.prepare(
-      `UPDATE permit_records SET row_version = COALESCE(row_version, 1) + 1, updated_at = datetime('now') WHERE id = ?`
-    ).run(permit.id);
-  }
-  if (Array.isArray(req.body?.milestones)) {
-    for (const m of req.body.milestones) {
-      if (!m?.key) continue;
-      if (String(m.key).startsWith('official_')) {
-        return res.status(400).json({ error: `Milestone ${m.key} is official/read-only` });
+  const body = req.body || {};
+  let claimResult;
+  try {
+    const tx = db.transaction(() => {
+      const claim = claimPermitWrite(permitId, body.expected_row_version);
+      if (!claim.ok) {
+        claimResult = claim;
+        return;
       }
-      const existing = db
-        .prepare(`SELECT value FROM internal_milestones WHERE permit_record_id = ? AND key = ?`)
-        .get(permit.id, m.key);
-      // Deliberate clear (distinct from blank import cells which preserve prior values)
-      if (m.clear === true || m.value === '') {
-        if (!existing) continue;
-        if (!m.clear && m.value === '') continue; // ignore accidental empty without clear flag
-        recordChange(permit.id, `milestone:${m.key}`, existing.value, '', user, 'ui_clear');
-        db.prepare(
-          `UPDATE internal_milestones SET value = '', edited_in_app = 1 WHERE permit_record_id = ? AND key = ?`
-        ).run(permit.id, m.key);
-        continue;
+      claimResult = claim;
+      const permit = claim.permit;
+      // Field edits (version already bumped by claim)
+      for (const key of editable) {
+        if (!(key in body)) continue;
+        let value = body[key];
+        if (value === '') value = ['next_action_due', 'primary_official_id'].includes(key) ? null : '';
+        if (String(permit[key] ?? '') === String(value ?? '')) continue;
+        if (key === 'jurisdiction_code' && String(permit.jurisdiction_code) !== String(value)) {
+          recordChange(
+            permit.id,
+            'jurisdiction_code',
+            permit.jurisdiction_code,
+            value,
+            user,
+            'ui'
+          );
+          recordChange(
+            permit.id,
+            'jurisdiction_confirmed',
+            permit.jurisdiction_confirmed,
+            0,
+            user,
+            'jurisdiction_change_clears_confirmation'
+          );
+          db.prepare(
+            `UPDATE permit_records SET jurisdiction_code = ?, jurisdiction_confirmed = 0,
+             jurisdiction_source = 'operator_pending_confirm', updated_at = datetime('now') WHERE id = ?`
+          ).run(value, permit.id);
+          continue;
+        }
+        recordChange(permit.id, key, permit[key], value, user, 'ui');
+        db.prepare(`UPDATE permit_records SET ${key} = ?, updated_at = datetime('now') WHERE id = ?`).run(
+          value,
+          permit.id
+        );
       }
-      if (m.value == null) continue;
-      if (existing) {
-        if (String(existing.value) === String(m.value)) continue;
-        recordChange(permit.id, `milestone:${m.key}`, existing.value, m.value, user, 'ui');
-        db.prepare(
-          `UPDATE internal_milestones SET value = ?, label = COALESCE(?, label), edited_in_app = 1
-           WHERE permit_record_id = ? AND key = ?`
-        ).run(String(m.value), m.label || null, permit.id, m.key);
-      } else {
-        db.prepare(
-          `INSERT INTO internal_milestones(permit_record_id, key, label, value, value_kind, source, edited_in_app)
-           VALUES (?, ?, ?, ?, ?, 'ui', 1)`
-        ).run(permit.id, m.key, m.label || m.key, String(m.value), m.value_kind || 'text');
+      // Explicit confirmation only when jurisdiction was not just cleared by a code change
+      if ('jurisdiction_confirmed' in body) {
+        const fresh = db.prepare('SELECT * FROM permit_records WHERE id = ?').get(permit.id);
+        const next = body.jurisdiction_confirmed ? 1 : 0;
+        // Ignore a simultaneous confirm=true if jurisdiction_code just changed in this request
+        const codeChanged =
+          'jurisdiction_code' in body &&
+          String(existing.jurisdiction_code) !== String(body.jurisdiction_code === '' ? null : body.jurisdiction_code);
+        if (!codeChanged && Number(fresh.jurisdiction_confirmed) !== next) {
+          recordChange(permit.id, 'jurisdiction_confirmed', fresh.jurisdiction_confirmed, next, user, 'ui');
+          db.prepare(
+            `UPDATE permit_records SET jurisdiction_confirmed = ?, jurisdiction_source = CASE
+               WHEN ? = 1 THEN 'operator_confirmed' ELSE jurisdiction_source END,
+             updated_at = datetime('now') WHERE id = ?`
+          ).run(next, next, permit.id);
+        }
       }
-    }
+      if (Array.isArray(body.milestones)) {
+        for (const m of body.milestones) {
+          if (!m?.key) continue;
+          if (String(m.key).startsWith('official_')) {
+            throw Object.assign(new Error(`Milestone ${m.key} is official/read-only`), {
+              status: 400,
+            });
+          }
+          const existingMs = db
+            .prepare(`SELECT value FROM internal_milestones WHERE permit_record_id = ? AND key = ?`)
+            .get(permit.id, m.key);
+          if (m.clear === true || m.value === '') {
+            if (!existingMs) continue;
+            if (!m.clear && m.value === '') continue;
+            recordChange(permit.id, `milestone:${m.key}`, existingMs.value, '', user, 'ui_clear');
+            db.prepare(
+              `UPDATE internal_milestones SET value = '', edited_in_app = 1 WHERE permit_record_id = ? AND key = ?`
+            ).run(permit.id, m.key);
+            continue;
+          }
+          if (m.value == null) continue;
+          if (existingMs) {
+            if (String(existingMs.value) === String(m.value)) continue;
+            recordChange(permit.id, `milestone:${m.key}`, existingMs.value, m.value, user, 'ui');
+            db.prepare(
+              `UPDATE internal_milestones SET value = ?, label = COALESCE(?, label), edited_in_app = 1
+               WHERE permit_record_id = ? AND key = ?`
+            ).run(String(m.value), m.label || null, permit.id, m.key);
+          } else {
+            db.prepare(
+              `INSERT INTO internal_milestones(permit_record_id, key, label, value, value_kind, source, edited_in_app)
+               VALUES (?, ?, ?, ?, ?, 'ui', 1)`
+            ).run(permit.id, m.key, m.label || m.key, String(m.value), m.value_kind || 'text');
+          }
+        }
+      }
+    });
+    tx();
+  } catch (err) {
+    if (err.status === 400) return res.status(400).json({ error: err.message });
+    throw err;
   }
-  updateLotReadiness(permit.id);
+
+  if (claimResult?.missingVersion) {
+    return res.status(400).json({
+      error: 'expected_row_version_required',
+      message:
+        'Save requires expected_row_version from the open detail. Reload the permit and try again.',
+      permit: db.prepare(`${PERMIT_SQL} WHERE p.id = ?`).get(permitId),
+    });
+  }
+  if (claimResult?.stale) {
+    return res.status(409).json({
+      error: 'stale_write',
+      message:
+        'This permit changed since you opened it (bulk, import, or another save). Your draft was not applied — reload or reconcile deliberately.',
+      permit: db.prepare(`${PERMIT_SQL} WHERE p.id = ?`).get(permitId),
+      server_row_version: claimResult.permit?.row_version,
+      client_expected_row_version: body.expected_row_version,
+    });
+  }
+
+  updateLotReadiness(permitId);
   rebuildAttention();
-  const updated = db.prepare(`${PERMIT_SQL} WHERE p.id = ?`).get(permit.id);
+  const updated = db.prepare(`${PERMIT_SQL} WHERE p.id = ?`).get(permitId);
   res.json({
     permit: updated,
-    readiness: getStoredAssessment(permit.id) || assessPermitReadiness(permit.id),
+    readiness: getStoredAssessment(permitId) || assessPermitReadiness(permitId),
   });
 });
 
@@ -1128,21 +1084,21 @@ app.post('/api/import/gospel/store', (_req, res) => {
 
 app.get('/api/export.xlsx', (req, res) => {
   const includeReviewed = req.query.includeReviewed === '1' || req.query.includeReviewed === 'true';
-  const filters = {};
-  for (const key of [
-    'use_classification',
-    'jurisdiction_code',
-    'internal_status',
-    'official_status',
-    'readiness_state',
-    'approaching_start',
-  ]) {
-    if (req.query[key]) filters[key] = String(req.query[key]);
+  const filters = normalizePermitFilters(req.query);
+  // selectedIds: comma-separated — selected-row export. When set, export those IDs
+  // (still subject to import-origin + any other filters). Filtered-row export = omit selectedIds.
+  let selectedIds = null;
+  if (req.query.selectedIds != null && String(req.query.selectedIds).trim() !== '') {
+    selectedIds = String(req.query.selectedIds)
+      .split(',')
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isFinite(n));
   }
   const buf = exportCoexistenceXlsx({
     contactStatuses: ['confirmed'],
     includeReviewedCandidates: includeReviewed,
     filters,
+    selectedIds,
   });
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', 'attachment; filename="permit-ledger-structured-export.xlsx"');
