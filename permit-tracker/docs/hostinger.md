@@ -91,5 +91,8 @@ Owner checklist: [`docs/hands-on-private-trial.md`](hands-on-private-trial.md)
 
 1. Login UI loads; `/api/health` → `ready: true`
 2. Owner login → import sanitized fixture → milestone edit + re-import
-3. Use filters, permit check, Find contact **demo**, export, Attention
-4. Restart/redeploy → data still present (**persistence gate** — not yet claimed for Hostinger)
+3. **Create trial operator** (no email invite): Sources → Create trial user → enter login + password privately (≥10 chars). Do not commit or paste credentials into git/chat.
+4. Optionally activate Fairfax PLUS (owner-only) so the operator can run eligible checks.
+5. Hand the operator login out-of-band. Operator can import (sanitized only), permits, resolve, check, edit, Attention, export, property/contacts demo — not user admin, source activation, or paid-provider settings.
+6. Use filters, permit check, Find contact **demo**, export, Attention
+7. Restart/redeploy → data still present (**persistence gate** — not yet claimed for Hostinger)

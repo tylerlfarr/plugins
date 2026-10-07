@@ -106,7 +106,7 @@ After first deploy:
 4. Confirm Structured export Contacts sheet has no sandbox/fixture rows.
 5. Restart Machine (`fly machines restart`) and confirm data still present (volume persistence).
 
-Invite operators (owner session): `POST /api/auth/invite` with `{ "email", "role": "operator" }` — deliver `invite_token` out-of-band.
+Create a trial operator (preferred, no email invite): owner session → Sources → **Create trial user**, or `POST /api/auth/users` with `{ "email", "password", "displayName?" }` (password ≥10). Optional legacy invite: `POST /api/auth/invite` → deliver `invite_token` out-of-band.
 
 ## Local dry-run of hosted flags (no Fly purchase)
 
@@ -124,7 +124,7 @@ Open `http://localhost:4173` → sign-in → import bundled sanitized fixture �
 
 ## Auth model
 
-- Roles: `owner` (settings, provider mode, reconcile, seed/invite) · `operator` (daily workbook)
+- Roles: `owner` (settings, provider mode, reconcile, seed, create user / invite, source activation, health details) · `operator` (daily workbook: import, permits, resolve, check when eligible, edit, Attention, export, property/contacts demo)
 - Sessions: HttpOnly cookie, scrypt passwords, SHA-256 token hashes
 - State-changing JSON needs `X-Requested-With: PermitLedger` (or same-origin)
 

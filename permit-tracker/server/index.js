@@ -85,6 +85,8 @@ import {
   logout,
   acceptInvite,
   createInvite,
+  createUser,
+  listUsers,
   publicUser,
   serializeCookie,
   clearCookie,
@@ -314,6 +316,25 @@ app.post('/api/auth/invite', requireAuth, requireOwner, (req, res) => {
   } catch (e) {
     res.status(400).json({ error: String(e.message || e) });
   }
+});
+
+/** Owner creates operator login + password privately (no email invitation). */
+app.post('/api/auth/users', requireAuth, requireOwner, (req, res) => {
+  try {
+    const user = createUser({
+      email: req.body?.email ?? req.body?.login,
+      password: req.body?.password,
+      displayName: req.body?.displayName || req.body?.display_name || '',
+      role: req.body?.role || 'operator',
+    });
+    res.status(201).json({ user });
+  } catch (e) {
+    res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
+app.get('/api/auth/users', requireAuth, requireOwner, (_req, res) => {
+  res.json({ users: listUsers() });
 });
 
 app.get('/api/meta', requireAuth, (req, res) => {
@@ -854,7 +875,7 @@ app.get('/api/sources/:key', (req, res) => {
   res.json({ source: src });
 });
 
-app.post('/api/sources/:key/activate', (req, res) => {
+app.post('/api/sources/:key/activate', requireOwner, (req, res) => {
   try {
     const src = activateSource(req.params.key, {
       reviewedBy: req.body?.reviewedBy || currentUser(),
@@ -865,7 +886,7 @@ app.post('/api/sources/:key/activate', (req, res) => {
   }
 });
 
-app.post('/api/sources/:key/state', (req, res) => {
+app.post('/api/sources/:key/state', requireOwner, (req, res) => {
   try {
     const src = setSourceState(req.params.key, req.body?.state, req.body?.evidence);
     res.json({ source: src });
@@ -889,6 +910,9 @@ app.post('/api/connect-location', async (req, res) => {
   try {
     const result = await connectLocation(req.body || {});
     if (req.body?.activate && req.body?.sourceKey) {
+      if (authEnabled() && req.user?.role !== 'owner') {
+        return res.status(403).json({ error: 'Owner role required to activate sources' });
+      }
       const src = activateSource(req.body.sourceKey, {
         reviewedBy: req.body.reviewedBy || currentUser(),
       });

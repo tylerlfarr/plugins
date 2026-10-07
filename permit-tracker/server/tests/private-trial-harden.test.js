@@ -208,6 +208,79 @@ test('operator cannot invite; owner can; invite accept creates operator', async 
   }
 });
 
+test('owner create-user makes operator; operator blocked from admin surfaces', async () => {
+  const client = await listen();
+  try {
+    const ownerCookie = await ownerSession(client);
+    const created = await client.request('POST', '/api/auth/users', {
+      body: {
+        email: 'trial.op@example.com',
+        password: 'trial-operator-10+',
+        displayName: 'Trial Op',
+        role: 'operator',
+      },
+      cookie: ownerCookie,
+      headers: { 'X-Requested-With': 'PermitLedger', Origin: client.base },
+    });
+    assert.equal(created.status, 201, JSON.stringify(created.data));
+    assert.equal(created.data.user.role, 'operator');
+    assert.equal(created.data.user.email, 'trial.op@example.com');
+    assert.equal(created.data.password, undefined);
+
+    const list = await client.request('GET', '/api/auth/users', { cookie: ownerCookie });
+    assert.equal(list.status, 200);
+    assert.ok(list.data.users.some((u) => u.email === 'trial.op@example.com'));
+
+    const opLogin = await client.request('POST', '/api/auth/login', {
+      body: { email: 'trial.op@example.com', password: 'trial-operator-10+' },
+      headers: { 'X-Requested-With': 'PermitLedger', Origin: client.base },
+    });
+    assert.equal(opLogin.status, 200, JSON.stringify(opLogin.data));
+    const opCookie = cookieFrom(opLogin.setCookie);
+
+    const deniedCreate = await client.request('POST', '/api/auth/users', {
+      body: {
+        email: 'another@example.com',
+        password: 'another-pass-10+',
+      },
+      cookie: opCookie,
+      headers: { 'X-Requested-With': 'PermitLedger', Origin: client.base },
+    });
+    assert.equal(deniedCreate.status, 403);
+
+    const deniedUsers = await client.request('GET', '/api/auth/users', { cookie: opCookie });
+    assert.equal(deniedUsers.status, 403);
+
+    const deniedActivate = await client.request(
+      'POST',
+      '/api/sources/fairfax_county_building_records_plus/activate',
+      {
+        body: { reviewedBy: 'op' },
+        cookie: opCookie,
+        headers: { 'X-Requested-With': 'PermitLedger', Origin: client.base },
+      }
+    );
+    assert.equal(deniedActivate.status, 403);
+
+    const deniedProvider = await client.request('POST', '/api/contacts/provider-mode', {
+      body: { mode: 'hosted_sandbox' },
+      cookie: opCookie,
+      headers: { 'X-Requested-With': 'PermitLedger', Origin: client.base },
+    });
+    assert.equal(deniedProvider.status, 403);
+
+    const deniedDetails = await client.request('GET', '/api/health/details', { cookie: opCookie });
+    assert.equal(deniedDetails.status, 403);
+
+    // Operator still reaches normal workbook APIs
+    const meta = await client.request('GET', '/api/meta', { cookie: opCookie });
+    assert.equal(meta.status, 200);
+    assert.equal(meta.data.authUser.role, 'operator');
+  } finally {
+    client.server.close();
+  }
+});
+
 test('login throttling bounds repeated failures', async () => {
   _resetLoginThrottleForTests();
   const client = await listen();

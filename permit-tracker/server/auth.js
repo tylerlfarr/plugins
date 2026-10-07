@@ -164,6 +164,52 @@ export function createInvite({ email, role = ROLES.OPERATOR, createdBy = null, d
   return { token, email: String(email || '').toLowerCase(), role, expires_at: expires };
 }
 
+/**
+ * Owner creates an operator login directly (no email invite).
+ * Login identifier is stored in `users.email` (email-shaped string).
+ * Secrets stay in the request body / host DB — never logged.
+ */
+export function createUser({ email, password, displayName = '', role = ROLES.OPERATOR } = {}) {
+  ensureAuthTables();
+  const login = String(email || '').trim().toLowerCase();
+  if (!login || !login.includes('@')) {
+    throw new Error('Login must be an email-shaped address');
+  }
+  if (!password || String(password).length < 10) {
+    throw new Error('Password must be at least 10 characters');
+  }
+  // Direct create is for temporary operators only — extra owners stay env-bootstrap / invite.
+  if (role !== ROLES.OPERATOR) {
+    throw new Error('Direct create supports operator role only');
+  }
+  const existing = db.prepare(`SELECT id FROM users WHERE lower(email) = ?`).get(login);
+  if (existing) throw new Error('A user with that login already exists');
+  const info = db
+    .prepare(
+      `INSERT INTO users(email, display_name, role, password_hash)
+       VALUES (?, ?, ?, ?)`
+    )
+    .run(login, displayName || login.split('@')[0], ROLES.OPERATOR, scryptHash(password));
+  return publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(Number(info.lastInsertRowid)));
+}
+
+export function listUsers() {
+  ensureAuthTables();
+  return db
+    .prepare(
+      `SELECT id, email, display_name, role, active, created_at FROM users ORDER BY id ASC`
+    )
+    .all()
+    .map((u) => ({
+      id: u.id,
+      email: u.email,
+      display_name: u.display_name,
+      role: u.role,
+      active: Boolean(u.active),
+      created_at: u.created_at,
+    }));
+}
+
 export function acceptInvite({ token, password, displayName = '' }) {
   ensureAuthTables();
   const inv = db

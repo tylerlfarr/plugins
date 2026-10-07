@@ -8,8 +8,9 @@ Disposable / trial data. Production Tracerfy **off**. Demo contacts are **labele
 ## Setup
 
 1. Confirm release: `GET /api/health` → note `release.gitShaShort`.
-2. Use sanitized fixture (or owner-approved disposable extract) — not production employer workbook until persistence gate passes ([hostinger-persistence-checklist.md](hostinger-persistence-checklist.md)).
-3. Pick **5–10** lot/permit rows the operator would normally touch this week.
+2. Sign in with the **operator** account the owner created (Sources → Create trial user). Operators cannot activate sources or change Tracerfy/provider settings — owner does that first.
+3. Use sanitized fixture (or owner-approved disposable extract) — not production employer workbook until persistence gate passes ([hostinger-persistence-checklist.md](hostinger-persistence-checklist.md)).
+4. Pick **5–10** lot/permit rows the operator would normally touch this week.
 
 ## Per-record stopwatch
 

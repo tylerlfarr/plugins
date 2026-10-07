@@ -14,7 +14,7 @@ Do **not** import the employer production workbook until Hostinger/local persist
 1. **Open site** — Sign-in page loads (not “Frontend assets missing”).
 2. **Owner login** — Use owner email/password.
 3. **Health / release** — `GET /api/health` shows `{ ok, ready, service, release }`. Note `release.gitShaShort`. Owner `/api/health/details` adds full release + `frontendBuilt` / db path.
-4. **Invite operator** — Create invite (owner-only). Deliver token out-of-band. Accept invite in a private window; confirm operator cannot invite others.
+4. **Create trial operator** — Sources → **Create trial user** (owner-only). Enter login + password privately (no email invite). Sign in as operator in a private window; confirm they can import/check/export but cannot create users, activate sources, or change provider mode.
 5. **Import** — Import → upload sanitized fixture → preview sections → commit. Empty Permits tab should prompt Import; table search only filters saved rows.
 6. **Edit + re-import** — Open a permit, edit an internal milestone value, re-import the same fixture. Confirm the edit remains (or a conflict is shown — not silent loss).
 7. **Use filters** — Filter Residential / Commercial / Unknown; list updates honestly.

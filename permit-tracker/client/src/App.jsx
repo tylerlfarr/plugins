@@ -106,8 +106,17 @@ export default function App() {
   const [busy, setBusy] = useState(false);
   const [authGate, setAuthGate] = useState(null); // null | { enabled, user }
   const [loginForm, setLoginForm] = useState({ email: '', password: '' });
+  const [createUserForm, setCreateUserForm] = useState({
+    email: '',
+    password: '',
+    displayName: '',
+  });
+  const [usersList, setUsersList] = useState([]);
 
   const connectors = meta.connectors || [];
+  const isOwner = Boolean(
+    !meta.authEnabled || meta.authUser?.role === 'owner' || authGate?.user?.role === 'owner'
+  );
 
   async function refreshLists() {
     const params = new URLSearchParams({ q, sort: sort.key, dir: sort.dir, ...filters });
@@ -616,8 +625,9 @@ export default function App() {
     }
     if (tab === 'sources') {
       api('/api/sources').then((d) => setSources(d.sources || []));
+      if (isOwner) refreshUsers();
     }
-  }, [tab, authGate]);
+  }, [tab, authGate, isOwner]);
 
   async function runConnectLocation() {
     setBusy(true);
@@ -664,6 +674,39 @@ export default function App() {
       });
       setSources((await api('/api/sources')).sources);
       setMessage(`Activated ${key} after review`);
+    } catch (e) {
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function refreshUsers() {
+    if (!isOwner || (meta.authEnabled && !authGate?.user)) return;
+    try {
+      const data = await api('/api/auth/users');
+      setUsersList(data.users || []);
+    } catch {
+      setUsersList([]);
+    }
+  }
+
+  async function createTrialUser() {
+    setBusy(true);
+    try {
+      await api('/api/auth/users', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email: createUserForm.email,
+          password: createUserForm.password,
+          displayName: createUserForm.displayName,
+          role: 'operator',
+        }),
+      });
+      setCreateUserForm({ email: '', password: '', displayName: '' });
+      setMessage('Trial operator created — share login privately (not email invite).');
+      await refreshUsers();
     } catch (e) {
       setMessage(String(e.message || e));
     } finally {
@@ -857,7 +900,7 @@ export default function App() {
         <header className="topbar">
           <div className="brand">
             <h1>Permit Ledger</h1>
-            <p>Invite-only pilot — sign in with your issued account.</p>
+            <p>Private pilot — sign in with your issued account.</p>
           </div>
         </header>
         <div className="panel stack" style={{ maxWidth: 420, margin: '2rem auto' }}>
@@ -943,7 +986,10 @@ export default function App() {
         </nav>
         {authGate?.user ? (
           <div className="muted" style={{ marginLeft: 'auto', display: 'flex', gap: '0.75rem', alignItems: 'center' }}>
-            <span>{authGate.user.email}</span>
+            <span>
+              {authGate.user.email}
+              {authGate.user.role ? ` · ${authGate.user.role}` : ''}
+            </span>
             <button
               type="button"
               className="btn"
@@ -1702,7 +1748,7 @@ export default function App() {
                       ) : null}
                     </div>
                   ) : null}
-                  {(meta.authUser?.role === 'owner' || !meta.authEnabled) && (
+                  {isOwner ? (
                     <details className="attention-item">
                       <summary>
                         <strong>Owner setup — Tracerfy (env / secrets only)</strong>
@@ -1732,25 +1778,32 @@ export default function App() {
                         operational exports.
                       </p>
                     </details>
+                  ) : (
+                    <p className="muted">
+                      Provider mode is owner-managed. Operators use the configured fixture/sandbox
+                      path for Find contact demos.
+                    </p>
                   )}
-                  <div className="toolbar">
-                    {['local_fixture', 'hosted_sandbox', 'production'].map((m) => (
-                      <button
-                        key={m}
-                        type="button"
-                        className={`btn ${tracerfy?.mode === m || tracerfy?.requestedMode === m ? 'primary' : ''}`}
-                        disabled={busy || (m === 'production' && !tracerfy?.productionGatesOk)}
-                        onClick={() => setProviderMode(m)}
-                        title={
-                          m === 'production' && !tracerfy?.productionGatesOk
-                            ? 'Connect Tracerfy to enable live lookups'
-                            : m
-                        }
-                      >
-                        {m}
-                      </button>
-                    ))}
-                  </div>
+                  {isOwner ? (
+                    <div className="toolbar">
+                      {['local_fixture', 'hosted_sandbox', 'production'].map((m) => (
+                        <button
+                          key={m}
+                          type="button"
+                          className={`btn ${tracerfy?.mode === m || tracerfy?.requestedMode === m ? 'primary' : ''}`}
+                          disabled={busy || (m === 'production' && !tracerfy?.productionGatesOk)}
+                          onClick={() => setProviderMode(m)}
+                          title={
+                            m === 'production' && !tracerfy?.productionGatesOk
+                              ? 'Connect Tracerfy to enable live lookups'
+                              : m
+                          }
+                        >
+                          {m}
+                        </button>
+                      ))}
+                    </div>
+                  ) : null}
                   <div className="toolbar">
                     <button
                       type="button"
@@ -2232,6 +2285,78 @@ export default function App() {
 
       {tab === 'sources' && (
         <div className="panel stack">
+          {isOwner ? (
+            <>
+              <h2>Create trial user</h2>
+              <p className="muted">
+                Owner-only. Enter login + password privately — no email invitation. Creates an{' '}
+                <span className="mono">operator</span> who can run workbook workflows but cannot
+                administer users, activate sources, or change paid-provider settings.
+              </p>
+              <div className="fields">
+                <div className="field">
+                  <label htmlFor="create-user-email">Login (email)</label>
+                  <input
+                    id="create-user-email"
+                    type="email"
+                    autoComplete="off"
+                    value={createUserForm.email}
+                    onChange={(e) =>
+                      setCreateUserForm((f) => ({ ...f, email: e.target.value }))
+                    }
+                  />
+                </div>
+                <div className="field">
+                  <label htmlFor="create-user-password">Password (≥10)</label>
+                  <input
+                    id="create-user-password"
+                    type="password"
+                    autoComplete="new-password"
+                    value={createUserForm.password}
+                    onChange={(e) =>
+                      setCreateUserForm((f) => ({ ...f, password: e.target.value }))
+                    }
+                  />
+                </div>
+                <div className="field">
+                  <label htmlFor="create-user-name">Display name (optional)</label>
+                  <input
+                    id="create-user-name"
+                    type="text"
+                    autoComplete="off"
+                    value={createUserForm.displayName}
+                    onChange={(e) =>
+                      setCreateUserForm((f) => ({ ...f, displayName: e.target.value }))
+                    }
+                  />
+                </div>
+              </div>
+              <button
+                type="button"
+                className="btn primary"
+                disabled={busy || !createUserForm.email || createUserForm.password.length < 10}
+                onClick={createTrialUser}
+              >
+                Create operator
+              </button>
+              {usersList.length ? (
+                <ul className="history">
+                  {usersList.map((u) => (
+                    <li key={u.id}>
+                      <span className="mono">{u.email}</span> · {u.role}
+                      {u.active ? '' : ' · inactive'}
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
+            </>
+          ) : (
+            <div className="banner warn">
+              Source activation and user administration are owner-only. Operators can still check
+              permits when a source is already activated and the AHJ is confirmed.
+            </div>
+          )}
+
           <h2>Connect a location</h2>
           <p className="muted">
             Choose state + county/city and record type. Verified sources show first; discovery
@@ -2302,13 +2427,16 @@ export default function App() {
                   <li key={s.key}>
                     <span className="mono">{s.key}</span> · {s.state}
                     {s.activated ? ' · activated' : ''}
-                    {!s.activated && s.state === 'verified' ? (
+                    {!s.activated && s.state === 'verified' && isOwner ? (
                       <>
                         {' '}
                         <button type="button" className="btn" disabled={busy} onClick={() => activateSourceKey(s.key)}>
                           Review & activate
                         </button>
                       </>
+                    ) : null}
+                    {!s.activated && s.state === 'verified' && !isOwner ? (
+                      <span className="muted"> · waiting for owner activation</span>
                     ) : null}
                   </li>
                 ))}

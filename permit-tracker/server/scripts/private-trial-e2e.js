@@ -137,27 +137,39 @@ async function runSession() {
       details.status === 200 && details.data.dbPath === dbPath && details.data.auth === true
     );
 
-    const invite = await api(base, 'POST', '/api/auth/invite', {
+    const created = await api(base, 'POST', '/api/auth/users', {
       cookie: ownerCookie,
-      body: { email: operatorEmail, role: 'operator' },
-    });
-    log('owner invite operator', invite.status === 200 && Boolean(invite.data.invite_token));
-
-    const accept = await api(base, 'POST', '/api/auth/accept-invite', {
       body: {
-        token: invite.data.invite_token,
+        email: operatorEmail,
         password: operatorPassword,
         displayName: 'Operator',
+        role: 'operator',
       },
     });
-    log('operator accept invite', accept.status === 200 && accept.data.user?.role === 'operator');
-    const opCookie = accept.cookie;
+    log(
+      'owner create trial operator',
+      created.status === 201 && created.data.user?.role === 'operator'
+    );
 
-    const opInviteDenied = await api(base, 'POST', '/api/auth/invite', {
-      cookie: opCookie,
-      body: { email: 'x@example.com', role: 'operator' },
+    const opLogin = await api(base, 'POST', '/api/auth/login', {
+      body: { email: operatorEmail, password: operatorPassword },
     });
-    log('operator cannot invite', opInviteDenied.status === 403);
+    log('operator login', opLogin.status === 200 && opLogin.data.user?.role === 'operator');
+    const opCookie = opLogin.cookie;
+
+    const opCreateDenied = await api(base, 'POST', '/api/auth/users', {
+      cookie: opCookie,
+      body: { email: 'x@example.com', password: 'xxxxx-pass-10+' },
+    });
+    log('operator cannot create users', opCreateDenied.status === 403);
+
+    const opActivateDenied = await api(
+      base,
+      'POST',
+      '/api/sources/fairfax_county_building_records_plus/activate',
+      { cookie: opCookie, body: { reviewedBy: 'op' } }
+    );
+    log('operator cannot activate sources', opActivateDenied.status === 403);
 
     const buf = buildSanitizedWorkbookBuffer();
     const previewFd = new FormData();
