@@ -1,8 +1,11 @@
 # Permit Ledger — single-instance React/Express + SQLite (Node 22 + lockfile)
 #
-# postinstall runs `npm run build` for Hostinger's full-tree `npm install`.
-# Docker copies package files first, so install MUST use --ignore-scripts,
-# then build explicitly after the full source tree is present.
+# Hostinger: full-tree `npm install` runs package.json `postinstall` → `npm run build`.
+# Docker: package files are copied before app source, so lifecycle scripts are skipped
+# during `npm ci`, then:
+#   - build stage: explicit `npm run build` after COPY .
+#   - runtime stage: `npm rebuild better-sqlite3` so native bindings exist
+#     (plain `--ignore-scripts` alone would leave better-sqlite3 unloadable)
 FROM node:22-bookworm-slim AS build
 WORKDIR /app
 COPY package.json package-lock.json ./
@@ -19,8 +22,14 @@ ENV NODE_ENV=production \
     PILOT_AUTH=1 \
     PERMIT_DB_PATH=/data/permit-ledger.sqlite \
     COOKIE_SECURE=1
+# Toolchain for better-sqlite3 native compile/rebuild after --ignore-scripts.
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends python3 make g++ \
+  && rm -rf /var/lib/apt/lists/*
 COPY package.json package-lock.json ./
-RUN npm ci --omit=dev --ignore-scripts && npm cache clean --force
+RUN npm ci --omit=dev --ignore-scripts \
+  && npm rebuild better-sqlite3 \
+  && npm cache clean --force
 COPY --from=build /app/client/dist ./client/dist
 COPY --from=build /app/server ./server
 USER root
