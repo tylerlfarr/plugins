@@ -102,6 +102,60 @@ export function isPermitDraftDirty(detail, detailServer) {
   return EDITABLE_PERMIT_FIELDS.some((k) => !fieldEqual(detail[k], detailServer[k]));
 }
 
+/** Property form fields protected by the same nav guard as permit drafts. */
+export const PROPERTY_FORM_FIELDS = [
+  'site_address',
+  'city',
+  'state',
+  'zip',
+  'parcel_apn',
+  'parcel_jurisdiction',
+];
+
+/** Dirty property form vs last applied/clean property baseline. */
+export function isPropertyFormDirty(propertyForm, propertyFormServer) {
+  if (!propertyForm) return false;
+  if (!propertyFormServer) {
+    // New unsaved property: dirty if any identity field has text.
+    return PROPERTY_FORM_FIELDS.some((k) => String(propertyForm[k] ?? '').trim() !== '');
+  }
+  if (!fieldEqual(propertyForm.id, propertyFormServer.id)) return true;
+  return PROPERTY_FORM_FIELDS.some((k) => !fieldEqual(propertyForm[k], propertyFormServer[k]));
+}
+
+/**
+ * Milestone edits in progress (before blur save).
+ * milestoneEdits: { [key]: string }, milestones: server rows.
+ */
+export function isMilestoneEditsDirty(milestoneEdits, milestones) {
+  if (!milestoneEdits || !milestones) return false;
+  for (const [key, value] of Object.entries(milestoneEdits)) {
+    const m = milestones.find((row) => row.key === key);
+    if (!m) {
+      if (String(value ?? '').trim() !== '') return true;
+      continue;
+    }
+    if (!fieldEqual(value, m.value)) return true;
+  }
+  return false;
+}
+
+/** Combined dirty check for nav guard / beforeunload / sign-out. */
+export function isRecordWorkspaceDirty({
+  detail,
+  detailServer,
+  propertyForm,
+  propertyFormServer,
+  milestoneEdits,
+  milestones,
+} = {}) {
+  return (
+    isPermitDraftDirty(detail, detailServer) ||
+    isPropertyFormDirty(propertyForm, propertyFormServer) ||
+    isMilestoneEditsDirty(milestoneEdits, milestones)
+  );
+}
+
 /** Partial PATCH: only keys that differ from base (detailServer). */
 export function dirtyPermitPatch(detail, detailServer) {
   if (!detail) return {};

@@ -18,6 +18,9 @@ import {
   buildPatchFromDecisions,
   dirtyPermitPatch,
   isPermitDraftDirty,
+  isPropertyFormDirty,
+  isMilestoneEditsDirty,
+  isRecordWorkspaceDirty,
 } from '../../client/src/draftMerge.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -230,4 +233,42 @@ test('DI-03: dirty draft detection is true for unsaved next_action (nav-guard co
   const draft = { ...server, next_action: 'QA UNSAVED NAVIGATION DRAFT' };
   assert.equal(isPermitDraftDirty(draft, server), true);
   assert.equal(isPermitDraftDirty(server, server), false);
+});
+
+test('DI-03: property form and in-progress milestone edits dirty the workspace guard', () => {
+  const server = {
+    owner: '',
+    internal_status: 'watching',
+    next_action: '',
+    next_action_due: null,
+    primary_official_id: 'BLDR-1',
+    jurisdiction_code: 'fairfax_county',
+    source_url: '',
+    permit_kind: 'building',
+    jurisdiction_confirmed: 0,
+  };
+  const propClean = {
+    id: 1,
+    site_address: '1 Main',
+    city: 'Fairfax',
+    state: 'VA',
+    zip: '22030',
+    parcel_apn: '',
+    parcel_jurisdiction: '',
+  };
+  const propDirty = { ...propClean, site_address: '2 Changed' };
+  assert.equal(isPropertyFormDirty(propDirty, propClean), true);
+  const milestones = [{ key: 'permit_release', value: '2026-01-01' }];
+  assert.equal(isMilestoneEditsDirty({ permit_release: 'typed-before-blur' }, milestones), true);
+  assert.equal(
+    isRecordWorkspaceDirty({
+      detail: server,
+      detailServer: server,
+      propertyForm: propDirty,
+      propertyFormServer: propClean,
+      milestoneEdits: {},
+      milestones,
+    }),
+    true
+  );
 });

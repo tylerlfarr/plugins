@@ -4,6 +4,9 @@ import {
   buildPatchFromDecisions,
   isPermitDraftDirty,
   dirtyPermitPatch,
+  isPropertyFormDirty,
+  isMilestoneEditsDirty,
+  isRecordWorkspaceDirty,
 } from './draftMerge.js';
 
 const INTERNAL_STATUS_OPTIONS = [
@@ -27,6 +30,9 @@ function jurisdictionLabel(code) {
   return JURISDICTION_OPTIONS.find((o) => o.value === code)?.label || code || '—';
 }
 
+/** Session-expiry / revoke: callers clear local drafts; never silent-restore after re-login. */
+let onAuthExpired = null;
+
 async function api(path, options = {}) {
   const headers = {
     'X-Requested-With': 'PermitLedger',
@@ -42,6 +48,9 @@ async function api(path, options = {}) {
       body = text ? JSON.parse(text) : null;
     } catch {
       body = null;
+    }
+    if (res.status === 401 && typeof onAuthExpired === 'function' && !path.startsWith('/api/auth/')) {
+      onAuthExpired();
     }
     const err = new Error(body?.message || body?.error || text || res.statusText);
     err.status = res.status;
@@ -95,6 +104,10 @@ export default function App() {
     parcel_apn: '',
     parcel_jurisdiction: '',
   });
+  /** Clean property baseline for dirty detection (mirrors detailServer). */
+  const [propertyFormServer, setPropertyFormServer] = useState(null);
+  /** In-progress milestone values before blur save: { [key]: string }. */
+  const [milestoneEdits, setMilestoneEdits] = useState({});
   const emptyPropertyForm = {
     id: null,
     site_address: '',
@@ -104,6 +117,19 @@ export default function App() {
     parcel_apn: '',
     parcel_jurisdiction: '',
   };
+
+  function clearWorkspaceDrafts() {
+    setDetail(null);
+    setDetailServer(null);
+    setDetailConflict(null);
+    setFieldDecisions({});
+    setNavGuard(null);
+    setPropertyForm({ ...emptyPropertyForm });
+    setPropertyFormServer(null);
+    setMilestoneEdits({});
+    setMilestones([]);
+    setSelectedPropertyId(null);
+  }
   const [manualContact, setManualContact] = useState({
     role: 'property_owner',
     full_name: '',
@@ -165,11 +191,12 @@ export default function App() {
   function applyPropertyToForm(prop) {
     if (!prop) {
       setPropertyForm({ ...emptyPropertyForm });
+      setPropertyFormServer({ ...emptyPropertyForm });
       setSelectedPropertyId(null);
       return;
     }
     setSelectedPropertyId(prop.id);
-    setPropertyForm({
+    const next = {
       id: prop.id,
       site_address: prop.site_address || '',
       city: prop.city || '',
@@ -177,11 +204,20 @@ export default function App() {
       zip: prop.zip || '',
       parcel_apn: prop.parcel_apn || '',
       parcel_jurisdiction: prop.parcel_jurisdiction || '',
-    });
+    };
+    setPropertyForm(next);
+    setPropertyFormServer({ ...next });
   }
 
   function detailIsDirty() {
-    return isPermitDraftDirty(detail, detailServer);
+    return isRecordWorkspaceDirty({
+      detail,
+      detailServer,
+      propertyForm,
+      propertyFormServer,
+      milestoneEdits,
+      milestones,
+    });
   }
 
   async function openDetail(id, { force = false } = {}) {
@@ -199,6 +235,8 @@ export default function App() {
     const keepId = Number(detail?.id) === Number(id) ? selectedPropertyId : null;
     // Clear record-specific form state immediately to avoid carryover while loading
     setPropertyForm({ ...emptyPropertyForm });
+    setPropertyFormServer(null);
+    setMilestoneEdits({});
     setSelectedPropertyId(null);
     setContacts([]);
     setContactJobs([]);
@@ -219,6 +257,7 @@ export default function App() {
     setDetailConflict(null);
     setFieldDecisions({});
     setNavGuard(null);
+    setMilestoneEdits({});
     setMilestones(data.milestones);
     setOfficialIds(data.officialIds);
     setHistory(data.history);
@@ -256,6 +295,7 @@ export default function App() {
     setNavGuard(null);
     setDetailConflict(null);
     setFieldDecisions({});
+    setMilestoneEdits({});
     if (g?.type === 'switch' && g.targetId != null) {
       await openDetail(g.targetId, { force: true });
     } else if (g?.type === 'tab') {
@@ -264,9 +304,34 @@ export default function App() {
     } else if (g?.type === 'signout') {
       await api('/api/auth/logout', { method: 'POST' });
       setAuthGate({ enabled: true, user: null });
-      setDetail(null);
-      setDetailServer(null);
-      setMessage('Signed out');
+      clearWorkspaceDrafts();
+      setMessage('Signed out — unsaved drafts discarded (not restored on next sign-in).');
+    }
+  }
+
+  async function savePendingWorkspace() {
+    const milestonePatch = [];
+    for (const [key, value] of Object.entries(milestoneEdits || {})) {
+      const m = milestones.find((row) => row.key === key);
+      if (!m) continue;
+      if (String(value ?? '') === String(m.value ?? '')) continue;
+      milestonePatch.push({
+        key: m.key,
+        label: m.label,
+        value,
+        value_kind: m.value_kind || 'text',
+      });
+    }
+    const fieldPatch = dirtyPermitPatch(detail, detailServer);
+    const hasPermitPatch = Object.keys(fieldPatch).length > 0 || milestonePatch.length > 0;
+    if (hasPermitPatch) {
+      const patchOverride = { ...fieldPatch };
+      if (milestonePatch.length) patchOverride.milestones = milestonePatch;
+      setMilestoneEdits({});
+      await saveDetail({ patchOverride });
+    }
+    if (isPropertyFormDirty(propertyForm, propertyFormServer)) {
+      await saveProperty({ confirm: false });
     }
   }
 
@@ -639,6 +704,11 @@ export default function App() {
         setDetailServer(data.permit);
         setDetailConflict(null);
       }
+      setMilestoneEdits((prev) => {
+        const next = { ...prev };
+        delete next[m.key];
+        return next;
+      });
       await openDetail(detail.id);
       await refreshLists();
     } catch (e) {
@@ -663,6 +733,19 @@ export default function App() {
   }
 
   useEffect(() => {
+    onAuthExpired = () => {
+      // Server session gone (logout elsewhere or expiry). Discard in-memory drafts —
+      // never silently re-apply them after the next login.
+      clearWorkspaceDrafts();
+      setAuthGate({ enabled: true, user: null });
+      setMessage('Session ended. Sign in again — prior unsaved drafts were discarded.');
+    };
+    return () => {
+      onAuthExpired = null;
+    };
+  }, []);
+
+  useEffect(() => {
     (async () => {
       try {
         const status = await api('/api/auth/status');
@@ -680,13 +763,24 @@ export default function App() {
 
   useEffect(() => {
     function onBeforeUnload(ev) {
-      if (!isPermitDraftDirty(detail, detailServer)) return;
+      if (
+        !isRecordWorkspaceDirty({
+          detail,
+          detailServer,
+          propertyForm,
+          propertyFormServer,
+          milestoneEdits,
+          milestones,
+        })
+      ) {
+        return;
+      }
       ev.preventDefault();
       ev.returnValue = '';
     }
     window.addEventListener('beforeunload', onBeforeUnload);
     return () => window.removeEventListener('beforeunload', onBeforeUnload);
-  }, [detail, detailServer]);
+  }, [detail, detailServer, propertyForm, propertyFormServer, milestoneEdits, milestones]);
 
   useEffect(() => {
     // Wait for auth bootstrap; when invite-only, do not hit protected APIs until signed in.
@@ -1162,6 +1256,7 @@ export default function App() {
                 }
                 api('/api/auth/logout', { method: 'POST' }).then(() => {
                   setAuthGate({ enabled: true, user: null });
+                  clearWorkspaceDrafts();
                   setMessage('Signed out');
                 });
               }}
@@ -1180,14 +1275,39 @@ export default function App() {
       </div>
       {navGuard ? (
         <div className="banner warn" role="dialog" aria-label="Unsaved changes">
-          You have unsaved edits on this permit.
+          You have unsaved edits (permit fields, property form, and/or in-progress milestones).
+          Choose Save, Discard, or Cancel before leaving.
           <div className="empty-actions" style={{ marginTop: 8 }}>
             <button
               type="button"
               className="btn primary"
               disabled={busy}
               onClick={async () => {
-                await saveDetail();
+                setBusy(true);
+                try {
+                  const g = navGuard;
+                  await savePendingWorkspace();
+                  // saveDetail clears switch/tab guards; handle leftover (property-only or sign-out).
+                  if (g?.type === 'signout') {
+                    setNavGuard(null);
+                    await api('/api/auth/logout', { method: 'POST' });
+                    setAuthGate({ enabled: true, user: null });
+                    clearWorkspaceDrafts();
+                    setMessage('Signed out');
+                  } else if (navGuard) {
+                    const left = navGuard;
+                    setNavGuard(null);
+                    if (left.type === 'switch' && left.targetId != null) {
+                      await openDetail(left.targetId, { force: true });
+                    } else if (left.type === 'tab') {
+                      setTab(left.nextTab);
+                    }
+                  }
+                } catch (e) {
+                  setMessage(String(e.message || e));
+                } finally {
+                  setBusy(false);
+                }
               }}
             >
               Save
@@ -2293,10 +2413,29 @@ export default function App() {
                         ) : (
                           <div className="field">
                             <input
-                              defaultValue={m.value ?? ''}
+                              value={
+                                milestoneEdits[m.key] !== undefined
+                                  ? milestoneEdits[m.key]
+                                  : (m.value ?? '')
+                              }
+                              onChange={(e) =>
+                                setMilestoneEdits((prev) => ({ ...prev, [m.key]: e.target.value }))
+                              }
                               onBlur={(e) => {
                                 if (String(e.target.value) !== String(m.value ?? '')) {
-                                  saveMilestone(m, e.target.value);
+                                  saveMilestone(m, e.target.value).then(() => {
+                                    setMilestoneEdits((prev) => {
+                                      const next = { ...prev };
+                                      delete next[m.key];
+                                      return next;
+                                    });
+                                  });
+                                } else {
+                                  setMilestoneEdits((prev) => {
+                                    const next = { ...prev };
+                                    delete next[m.key];
+                                    return next;
+                                  });
                                 }
                               }}
                             />

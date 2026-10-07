@@ -318,3 +318,80 @@ test('forceFail on import record does not invent synthetic status', async () => 
   const after = db.prepare(`SELECT official_status FROM permit_records WHERE id = ?`).get(permit.id);
   assert.equal(after.official_status, before);
 });
+
+test('sync bumps row_version when official fields change; not_found stays orthogonal', () => {
+  const permit = db
+    .prepare(
+      `SELECT * FROM permit_records WHERE primary_official_id = 'BLDR-2026-00263' AND record_origin = 'import'`
+    )
+    .get();
+  assert.ok(permit);
+  const v0 = Number(permit.row_version || 1);
+
+  const miss = applyConnectorResult(
+    permit,
+    {
+      outcome: 'not_found',
+      mode: 'live',
+      error: 'not found',
+      sourceNativeStatus: '',
+      fields: {},
+    },
+    'phase1-test',
+    permit.primary_official_id
+  );
+  assert.equal(miss.outcome, 'not_found');
+  const afterMiss = db.prepare(`SELECT row_version, official_status FROM permit_records WHERE id = ?`).get(
+    permit.id
+  );
+  assert.equal(
+    Number(afterMiss.row_version),
+    v0,
+    'not_found must not bump row_version (check telemetry only)'
+  );
+
+  const refreshed = db.prepare(`SELECT * FROM permit_records WHERE id = ?`).get(permit.id);
+  const updated = applyConnectorResult(
+    refreshed,
+    {
+      outcome: 'updated',
+      mode: 'live',
+      sourceNativeStatus: 'ISSUED',
+      officialStatus: 'Issued',
+      fields: { sourceUrl: 'https://example.test/permit/bldr' },
+      fieldAvailability: {},
+    },
+    'phase1-test',
+    refreshed.primary_official_id
+  );
+  assert.equal(updated.outcome, 'updated');
+  assert.equal(updated.version_bumped, true);
+  const afterUp = db
+    .prepare(`SELECT row_version, official_status, source_url FROM permit_records WHERE id = ?`)
+    .get(permit.id);
+  assert.ok(Number(afterUp.row_version) > v0, 'visible-field sync must bump row_version');
+  assert.equal(afterUp.official_status, 'Issued');
+  assert.equal(afterUp.source_url, 'https://example.test/permit/bldr');
+  assert.equal(Number(updated.row_version), Number(afterUp.row_version));
+
+  // Pure no_change after same values — orthogonal (no further bump of visible fields)
+  const v1 = Number(afterUp.row_version);
+  const again = db.prepare(`SELECT * FROM permit_records WHERE id = ?`).get(permit.id);
+  const noChange = applyConnectorResult(
+    again,
+    {
+      outcome: 'updated',
+      mode: 'live',
+      sourceNativeStatus: 'ISSUED',
+      officialStatus: 'Issued',
+      fields: { sourceUrl: 'https://example.test/permit/bldr' },
+      fieldAvailability: {},
+    },
+    'phase1-test',
+    again.primary_official_id
+  );
+  assert.equal(noChange.outcome, 'no_change');
+  assert.equal(noChange.version_bumped, false);
+  const afterNo = db.prepare(`SELECT row_version FROM permit_records WHERE id = ?`).get(permit.id);
+  assert.equal(Number(afterNo.row_version), v1);
+});

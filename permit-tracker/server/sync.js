@@ -16,6 +16,7 @@ import {
 } from './readiness.js';
 import { applyOfficialUseToPermit } from './useClassification.js';
 import { listSources } from './sources/registry.js';
+import { bumpPermitRowVersion } from './rowVersion.js';
 
 /** Explicit test bypass only — never enable on Hostinger / production. */
 export function sourceEligibilityBypassed() {
@@ -318,8 +319,22 @@ export function applyConnectorResult(permit, result, changedBy = 'connector', qu
   params.push(permit.id);
   db.prepare(`UPDATE permit_records SET ${sets.join(', ')} WHERE id = ?`).run(...params);
 
+  // Phase 1: bump row_version only when operator-visible fields changed.
+  // Check-timestamp-only / pure no_change stay orthogonal (see docs/cas-bump-policy.md).
+  let rowVersion = null;
+  if (changed) {
+    rowVersion = bumpPermitRowVersion(permit.id);
+  }
+
   updateReadiness(permit.id);
-  return { outcome, mode: result.mode, fieldAvailability: result.fieldAvailability, baseline: establishingBaseline };
+  return {
+    outcome,
+    mode: result.mode,
+    fieldAvailability: result.fieldAvailability,
+    baseline: establishingBaseline,
+    row_version: rowVersion,
+    version_bumped: Boolean(changed),
+  };
 }
 
 /** Lot-readiness under configured workbook rules (not silent official-status Ready). */

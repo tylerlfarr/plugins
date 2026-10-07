@@ -32,6 +32,7 @@ function reset() {
     DELETE FROM archived_sheet_rows;
     DELETE FROM saved_filters;
     DELETE FROM import_runs;
+    DELETE FROM import_commit_keys;
     DELETE FROM check_runs;
   `);
 }

@@ -1,8 +1,8 @@
 # Hostinger durability proposal (approval required — do not execute yet)
 
-**Status:** Proposal only. No Hostinger settings changes, no DB move/reset, no restart/redeploy/restore in this change set.
+**Status:** Proposal only. No Hostinger settings changes, no DB move/reset, no restart/redeploy/restore in this change set. **Ops owner must execute** after explicit approval.
 
-**Related:** [hostinger-persistence-checklist.md](./hostinger-persistence-checklist.md), [hostinger.md](./hostinger.md), [deploy.md](./deploy.md)
+**Related:** [hostinger-persistence-checklist.md](./hostinger-persistence-checklist.md), [hostinger.md](./hostinger.md), [deploy.md](./deploy.md), [cas-bump-policy.md](./cas-bump-policy.md)
 
 Live site: https://darkgrey-gaur-146027.hostingersite.com/
 
@@ -22,80 +22,83 @@ Before importing real operational data:
 2. Confirm a consistent SQLite backup + restore procedure (file copy of `.sqlite` + `-wal`/`-shm` if present).
 3. Pass a **disposable** restart → redeploy → restore rehearsal with sanitized data only.
 
-## Proposed Hostinger actions (for later approval)
+## Exact proposed owner actions (do not run until approved)
 
-### A) Choose durable path (owner / Hostinger admin)
+### Prerequisites (owner confirms before any cutover)
 
-1. In hPanel, identify a path Hostinger documents as persistent for this Node app (examples to verify against current Hostinger docs — do not invent):
-   - Domain-level data directory outside `hbuilds/versions/…` (e.g. under the domain home, not under a single build id), or
-   - A mounted volume / “persistent storage” feature if enabled for this plan.
-2. Create directory if needed, e.g.  
-   `/home/u152631036/domains/darkgrey-gaur-146027.hostingersite.com/permit-ledger-data/`  
-   (exact path must be confirmed in File Manager before use).
-3. Set environment variable on the Node app (Hostinger → Node.js → Environment):
-   - `PERMIT_DB_PATH=/home/u152631036/domains/.../permit-ledger-data/permit-ledger.sqlite`
-4. Keep existing trial flags unchanged unless separately approved:
-   - `AUTO_SEED=0`
-   - Auth enabled (`PILOT_AUTH=1` / current invite-only settings)
-   - Paid Tracerfy disabled / local_fixture
+| # | Prerequisite | Pass criteria |
+|---|---|---|
+| P1 | Maintenance window agreed (idle writes) | Team knows not to import/edit during cutover |
+| P2 | Durable directory exists outside `hbuilds/versions/…` | Visible in File Manager; writable by Node app user |
+| P3 | Off-host backup location ready | Laptop/S3/drive path recorded |
+| P4 | Auth + `AUTO_SEED=0` + Tracerfy production off | Unchanged from pilot flags |
+| P5 | Current `/api/health` SHA + owner `/api/health/details` `dbPath` recorded | Screenshot or note with timestamp |
 
-**Do not** delete or truncate the current version-scoped DB as part of this move until a verified copy exists.
+**Proposed durable path (confirm in File Manager before use):**
 
-### B) One-time migrate (copy, then cut over)
+`/home/u152631036/domains/darkgrey-gaur-146027.hostingersite.com/permit-ledger-data/permit-ledger.sqlite`
 
-1. Stop or idle writes (short maintenance window).
-2. Copy current SQLite (+ `-wal` / `-shm` if present) from the version-scoped path to the durable path via File Manager / SFTP.
-3. Set `PERMIT_DB_PATH` to the durable file.
-4. Restart the Node app **once**.
-5. Owner: `GET /api/health/details` → confirm `dbPath` equals the durable path.
-6. Spot-check users still login; counts match pre-move snapshot.
+Create parent dir `permit-ledger-data/` if missing. Do **not** invent a different path without verifying Hostinger persistence docs for this plan.
 
-**Rollback:** Point `PERMIT_DB_PATH` back to the previous path (or restore the pre-move copy), restart once, re-check `dbPath`.
+### A) One-time migrate (copy, then cut over)
 
-### C) Backup / restore procedure (document & practice)
+| Step | Exact action | Rollback if fail |
+|---|---|---|
+| A1 | Idle writes / short maintenance | — |
+| A2 | In File Manager/SFTP: copy current version-scoped `permit-ledger.sqlite` **and** any `permit-ledger.sqlite-wal` / `-shm` to `permit-ledger-data/` | Leave originals untouched |
+| A3 | Hostinger → Node.js → Environment: set `PERMIT_DB_PATH=<durable absolute path from A2>` | Unset or restore prior env value |
+| A4 | Keep `AUTO_SEED=0`, auth on, Tracerfy disabled / `local_fixture` | Revert those flags only if you changed them (should not) |
+| A5 | Restart the Node app **once** (no redeploy yet) | Point `PERMIT_DB_PATH` back to version-scoped path; restart once |
+| A6 | Owner: `GET /api/health/details` → `dbPath` equals durable path | Same as A5 rollback |
+| A7 | Spot-check: login works; user/permit counts match pre-move note from P5 | Restore pre-move copy over durable file; restart |
 
-**Backup (daily or pre-deploy):**
+**Do not** delete the version-scoped DB until A6–A7 pass and an off-host backup exists.
+
+### B) Backup procedure (daily or pre-deploy)
 
 1. Prefer app idle or brief pause.
-2. Copy `permit-ledger.sqlite` and any `permit-ledger.sqlite-wal` / `-shm` to an off-host location (download + local archive).
-3. Label with date + `release.gitShaShort` from `/api/health`.
+2. Copy `permit-ledger.sqlite` + `-wal`/`-shm` (if present) from the **durable** path to off-host storage.
+3. Label archive: `YYYY-MM-DD-HHMM-<gitShaShort>.sqlite` using `/api/health` → `release.gitShaShort`.
 
-**Restore:**
+Hostinger MySQL/Postgres “database backups” typically **do not** cover this SQLite file.
+
+### C) Restore procedure (emergency / rehearsal)
 
 1. Stop Node app.
-2. Replace durable SQLite files with the backup set.
-3. Start app; verify health + spot-check a known permit / user.
+2. Replace durable SQLite files with the backup set (all three siblings if WAL mode).
+3. Start app; verify `/api/health`, login, and a known permit / distinctive milestone.
+4. If restore target was a **copy** path for rehearsal, do not overwrite production durable file until counts match.
 
-Hostinger “database backups” for MySQL/Postgres typically **do not** cover this SQLite file — do not rely on them unless File Manager coverage of the durable path is confirmed.
+### D) Disposable verification plan (sanitized only — after approval)
 
-## Disposable verification plan (sanitized only — after approval)
+Use `server/fixtures/sanitized-source-workbook.xlsx` only. **No** employer/gospel workbook. **No** paid Tracerfy.
 
-Use `server/fixtures/sanitized-source-workbook.xlsx` only. No employer workbook.
-
-| Step | Action | Pass criteria |
-|---|---|---|
-| 0 | Record `/api/health` release SHA + `dbPath` | Matches expected tip + durable path after cutover |
-| 1 | Import sanitized fixture; set distinctive milestone e.g. `HOSTINGER-DURABILITY-CHECK` | Counts + value recorded |
-| 2 | **Restart** (no redeploy) | Same counts + milestone + logins |
-| 3 | Off-host backup of SQLite files | Files in hand |
-| 4 | **Redeploy** authorized branch | New release SHA; `dbPath` still durable; data survives |
-| 5 | (Optional) Restore rehearsal on a **copy** path or after intentional swap | Restored milestone returns |
+| Step | Action | Pass criteria | Local ≠ hosted |
+|---|---|---|---|
+| 0 | Record `/api/health` release SHA + owner `dbPath` | Tip SHA + durable path after cutover | Hosted only |
+| 1 | Import sanitized fixture; set distinctive next_action e.g. `HOSTINGER-DURABILITY-CHECK` | Counts + value persisted | Hosted |
+| 2 | **Restart** once (no redeploy) | Same counts + milestone + logins | Hosted |
+| 3 | Off-host backup of SQLite files | Files in hand with SHA label | Hosted |
+| 4 | **Redeploy** authorized branch | New release SHA; `dbPath` still durable; data from step 1 survives | Hosted |
+| 5 | Restore rehearsal into a **separate copy** file (or after intentional swap on disposable DB) | Restored milestone returns; counts match backup | Hosted |
 
 If step 4 loses data: restore from step 3; **do not** import real data until path + procedure pass.
 
-## Prerequisites
+### Rollback summary
 
-- Owner approval for env change + single restart/redeploy window
-- Confirmed durable directory on this Hostinger plan
-- Off-host place to store SQLite backups
-- Auth + `AUTO_SEED=0` + Tracerfy production remains off
+| Failure point | Owner action |
+|---|---|
+| Wrong `dbPath` after restart | Set `PERMIT_DB_PATH` back to previous path; restart once |
+| Durable file corrupt/empty | Copy pre-move version-scoped DB (kept until verified) over durable path; restart |
+| Redeploy wiped data (path still version-scoped) | Treat as failed cutover; fix path; restore from off-host backup; do not import gospel |
 
-## Out of scope for this proposal
+## Out of scope for agents / this PR
 
-- Changing Hostinger settings in this PR
-- Moving/resetting hosted data now
-- Purchases, employer workbook import, QuickFixFarr changes
+- Changing Hostinger settings
+- Moving/resetting hosted data
+- Restart, redeploy, or restore execution
+- Purchases, employer workbook upload, QuickFixFarr changes
 
 ## Recommendation
 
-Approve **A → B → C → verification table** as a separate ops task before any real workbook import. Until then, treat hosted SQLite as **non-durable** and keep hosted evaluation empty or sanitized-only under supervision.
+Approve **Prerequisites → A → B → C → D** as a separate ops task before any real workbook import. Until then, treat hosted SQLite as **non-durable** and keep hosted evaluation empty or sanitized-only under supervision.

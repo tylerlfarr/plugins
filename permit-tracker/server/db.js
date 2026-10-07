@@ -295,6 +295,15 @@ export function migrate() {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
 
+    CREATE TABLE IF NOT EXISTS import_commit_keys (
+      content_hash TEXT PRIMARY KEY,
+      filename TEXT NOT NULL DEFAULT '',
+      summary_json TEXT NOT NULL,
+      permits_created INTEGER NOT NULL DEFAULT 0,
+      actor TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
     CREATE TABLE IF NOT EXISTS archived_sheet_rows (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       sheet_name TEXT NOT NULL,

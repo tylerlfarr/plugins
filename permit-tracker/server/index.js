@@ -118,26 +118,58 @@ const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 
 
 /** In-memory preview → commit sessions (exact buffer from preview). */
 const workbookPreviewSessions = new Map();
+/** Successful commit results keyed by previewId (network retry / double-submit). */
+const workbookCommitResults = new Map();
 const PREVIEW_TTL_MS = 30 * 60 * 1000;
+const COMMIT_RESULT_TTL_MS = 30 * 60 * 1000;
 
 function prunePreviewSessions() {
   const now = Date.now();
   for (const [id, sess] of workbookPreviewSessions) {
     if (now - sess.createdAt > PREVIEW_TTL_MS) workbookPreviewSessions.delete(id);
   }
+  for (const [id, entry] of workbookCommitResults) {
+    if (now - entry.createdAt > COMMIT_RESULT_TTL_MS) workbookCommitResults.delete(id);
+  }
+}
+
+function contentHashOfBuffer(buffer) {
+  return crypto.createHash('sha256').update(Buffer.from(buffer)).digest('hex');
 }
 
 function storeWorkbookPreview(buffer, filename, parsed, actor) {
   prunePreviewSessions();
   const previewId = crypto.randomBytes(16).toString('hex');
+  const contentHash = contentHashOfBuffer(buffer);
   workbookPreviewSessions.set(previewId, {
     buffer,
     filename,
     parsed,
+    contentHash,
     actor: actor || null,
     createdAt: Date.now(),
   });
   return previewId;
+}
+
+function recordImportCommitKey(contentHash, filename, summary, actor, previewId) {
+  if (!contentHash) return;
+  db.prepare(
+    `INSERT INTO import_commit_keys(content_hash, filename, summary_json, permits_created, actor)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(content_hash) DO UPDATE SET
+       filename = excluded.filename,
+       summary_json = excluded.summary_json,
+       permits_created = excluded.permits_created,
+       actor = excluded.actor,
+       created_at = datetime('now')`
+  ).run(
+    contentHash,
+    filename || '',
+    JSON.stringify({ ...(summary || {}), previewId: previewId || null }),
+    Number(summary?.permits_created || 0),
+    actor || ''
+  );
 }
 const requestActor = new AsyncLocalStorage();
 
@@ -1104,10 +1136,11 @@ app.get('/api/reviews', (_req, res) => {
   });
 });
 
-function workbookPreviewResponse(parsed, filename, previewId = null) {
+function workbookPreviewResponse(parsed, filename, previewId = null, contentHash = null) {
   return {
     filename,
     previewId,
+    contentHash: contentHash || null,
     sheets: parsed.sheets,
     ignoredSheets: parsed.ignoredSheets,
     archivedSheets: parsed.ignoredSheets,
@@ -1159,7 +1192,10 @@ app.post('/api/import/workbook/preview', (req, res) => {
         parsed,
         currentUser()
       );
-      res.json(workbookPreviewResponse(parsed, req.file.originalname, previewId));
+      const sess = workbookPreviewSessions.get(previewId);
+      res.json(
+        workbookPreviewResponse(parsed, req.file.originalname, previewId, sess?.contentHash)
+      );
     } catch (e) {
       res.status(400).json(importErrorPayload(e));
     }
@@ -1181,11 +1217,19 @@ app.post('/api/import/workbook/commit', (req, res) => {
       let buffer = req.file?.buffer;
       let filename = req.file?.originalname || 'upload.xlsx';
       let parsed = null;
-      const previewId = req.body?.previewId || req.query?.previewId;
+      let contentHash = null;
+      const previewId = req.body?.previewId || req.query?.previewId
+        ? String(req.body?.previewId || req.query?.previewId)
+        : null;
 
       if (previewId) {
         prunePreviewSessions();
-        const sess = workbookPreviewSessions.get(String(previewId));
+        // Idempotent retry: same preview token after successful commit returns cached result.
+        const prior = workbookCommitResults.get(previewId);
+        if (prior) {
+          return res.json({ ...prior.payload, idempotent: true });
+        }
+        const sess = workbookPreviewSessions.get(previewId);
         if (!sess) {
           return res.status(400).json({
             error:
@@ -1196,7 +1240,8 @@ app.post('/api/import/workbook/commit', (req, res) => {
         buffer = sess.buffer;
         filename = sess.filename;
         parsed = sess.parsed;
-        workbookPreviewSessions.delete(String(previewId));
+        contentHash = sess.contentHash;
+        workbookPreviewSessions.delete(previewId);
       } else if (!buffer && req.body?.useStoreWorkbook) {
         if (!SOURCE_WORKBOOK || !fs.existsSync(SOURCE_WORKBOOK)) {
           return res.status(404).json({
@@ -1216,14 +1261,23 @@ app.post('/api/import/workbook/commit', (req, res) => {
         parsed = parseWorkbookBuffer(buffer);
         assertRecognizedWorkbook(parsed, filename);
       }
-      const summary = commitWorkbookParse(parsed, { changedBy: currentUser() });
+      if (!contentHash) contentHash = contentHashOfBuffer(buffer);
+      const actor = currentUser();
+      const summary = commitWorkbookParse(parsed, { changedBy: actor });
+      recordImportCommitKey(contentHash, filename, summary, actor, previewId);
       rebuildAttention();
-      res.json({
+      const payload = {
         summary,
         sectionCount: parsed.permitTracker.sections.length,
         filename,
-        changedBy: currentUser(),
-      });
+        contentHash,
+        changedBy: actor,
+        idempotent: false,
+      };
+      if (previewId) {
+        workbookCommitResults.set(previewId, { payload, createdAt: Date.now() });
+      }
+      res.json(payload);
     } catch (e) {
       res.status(400).json(importErrorPayload(e));
     }
@@ -1262,7 +1316,10 @@ app.post('/api/import/gospel/preview', upload.single('file'), (req, res) => {
       parsed,
       currentUser()
     );
-    res.json(workbookPreviewResponse(parsed, req.file.originalname, previewId));
+    const sess = workbookPreviewSessions.get(previewId);
+    res.json(
+      workbookPreviewResponse(parsed, req.file.originalname, previewId, sess?.contentHash)
+    );
   } catch (e) {
     res.status(400).json(importErrorPayload(e));
   }
@@ -1273,16 +1330,23 @@ app.post('/api/import/gospel/commit', upload.single('file'), (req, res) => {
     let buffer = req.file?.buffer;
     let filename = req.file?.originalname || 'upload.xlsx';
     let parsed = null;
-    const previewId = req.body?.previewId;
+    let contentHash = null;
+    const previewId = req.body?.previewId ? String(req.body.previewId) : null;
     if (previewId) {
-      const sess = workbookPreviewSessions.get(String(previewId));
+      prunePreviewSessions();
+      const prior = workbookCommitResults.get(previewId);
+      if (prior) {
+        return res.json({ ...prior.payload, idempotent: true });
+      }
+      const sess = workbookPreviewSessions.get(previewId);
       if (!sess) {
         return res.status(400).json({ error: 'Preview session expired', code: 'preview_expired' });
       }
       buffer = sess.buffer;
       filename = sess.filename;
       parsed = sess.parsed;
-      workbookPreviewSessions.delete(String(previewId));
+      contentHash = sess.contentHash;
+      workbookPreviewSessions.delete(previewId);
     } else if (!buffer && (req.body?.useStoreGospel || req.body?.useStoreWorkbook)) {
       if (!fs.existsSync(SOURCE_WORKBOOK)) {
         return res.status(404).json({ error: 'Source workbook not found in store' });
@@ -1295,13 +1359,22 @@ app.post('/api/import/gospel/commit', upload.single('file'), (req, res) => {
       parsed = parseWorkbookBuffer(buffer);
       assertRecognizedWorkbook(parsed, filename);
     }
-    const summary = commitWorkbookParse(parsed, { changedBy: currentUser() });
+    if (!contentHash) contentHash = contentHashOfBuffer(buffer);
+    const actor = currentUser();
+    const summary = commitWorkbookParse(parsed, { changedBy: actor });
+    recordImportCommitKey(contentHash, filename, summary, actor, previewId);
     rebuildAttention();
-    res.json({
+    const payload = {
       summary,
       sectionCount: parsed.permitTracker.sections.length,
-      changedBy: currentUser(),
-    });
+      contentHash,
+      changedBy: actor,
+      idempotent: false,
+    };
+    if (previewId) {
+      workbookCommitResults.set(previewId, { payload, createdAt: Date.now() });
+    }
+    res.json(payload);
   } catch (e) {
     res.status(400).json(importErrorPayload(e));
   }
