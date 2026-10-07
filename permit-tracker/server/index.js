@@ -5,7 +5,16 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { fileURLToPath } from 'node:url';
-import { db, getSetting, setSetting, recordChange, migrate, getDbPath, dbIsReady } from './db.js';
+import {
+  db,
+  getSetting,
+  setSetting,
+  recordChange,
+  migrate,
+  getDbPath,
+  dbIsReady,
+  resolveSourceAttentionForPermit as resolveSourceAttention,
+} from './db.js';
 import { listConnectors, FAIRFAX_FIELD_AVAILABILITY } from './connectors/index.js';
 import {
   syncPermitById,
@@ -26,12 +35,14 @@ import {
   parseWorkbookBuffer,
   commitWorkbookParse,
   importWorkbookFile,
+  assertRecognizedWorkbook,
   isFairfaxShapedId,
 } from './workbookImport.js';
 import { exportCoexistenceXlsx } from './excelExport.js';
 import { buildPermitFilterClause, normalizePermitFilters } from './permitFilters.js';
 import { claimPermitWrite, bumpPermitRowVersion } from './rowVersion.js';
 import { seed } from './seed.js';
+import crypto from 'node:crypto';
 import {
   ensureSourceRegistrySeeded,
   listSources,
@@ -104,6 +115,30 @@ const clientDist = path.join(root, 'client', 'dist');
 const clientIndex = path.join(clientDist, 'index.html');
 const frontendBuilt = () => fs.existsSync(clientIndex);
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 20 * 1024 * 1024 } });
+
+/** In-memory preview → commit sessions (exact buffer from preview). */
+const workbookPreviewSessions = new Map();
+const PREVIEW_TTL_MS = 30 * 60 * 1000;
+
+function prunePreviewSessions() {
+  const now = Date.now();
+  for (const [id, sess] of workbookPreviewSessions) {
+    if (now - sess.createdAt > PREVIEW_TTL_MS) workbookPreviewSessions.delete(id);
+  }
+}
+
+function storeWorkbookPreview(buffer, filename, parsed, actor) {
+  prunePreviewSessions();
+  const previewId = crypto.randomBytes(16).toString('hex');
+  workbookPreviewSessions.set(previewId, {
+    buffer,
+    filename,
+    parsed,
+    actor: actor || null,
+    createdAt: Date.now(),
+  });
+  return previewId;
+}
 const requestActor = new AsyncLocalStorage();
 
 function readReleaseInfo() {
@@ -610,6 +645,10 @@ app.patch('/api/permits/:id', (req, res) => {
           value,
           permit.id
         );
+        if (key === 'primary_official_id') {
+          // ID replacement makes prior source-failure Attention obsolete
+          resolveSourceAttention(permit.id);
+        }
       }
       // Explicit confirmation only when jurisdiction was not just cleared by a code change
       if ('jurisdiction_confirmed' in body) {
@@ -752,7 +791,8 @@ app.get('/api/attention', (_req, res) => {
   const items = db
     .prepare(
       `SELECT a.*, p.primary_official_id, p.official_status, p.internal_status, p.owner,
-              p.readiness_state, p.progress_anchor_at, p.last_successful_check_at,
+              p.next_action, p.next_action_due, p.readiness_state, p.progress_anchor_at,
+              p.last_successful_check_at,
               lg.lot_label, cs.community_name, cs.project_code
        FROM attention_events a
        LEFT JOIN permit_records p ON p.id = a.permit_record_id
@@ -820,35 +860,123 @@ app.post('/api/conflicts/:id/resolve', (req, res) => {
   const id = Number(req.params.id);
   const conflict = db.prepare('SELECT * FROM import_conflicts WHERE id = ?').get(id);
   if (!conflict) return res.status(404).json({ error: 'Not found' });
+  if (conflict.status !== 'pending') {
+    return res.status(409).json({
+      error: 'conflict_already_resolved',
+      message: 'This import conflict was already resolved.',
+      conflict,
+    });
+  }
   const choice = req.body?.resolution; // keep_app | take_incoming | clear
   if (!['keep_app', 'take_incoming', 'clear'].includes(choice)) {
     return res.status(400).json({ error: 'resolution must be keep_app | take_incoming | clear' });
   }
-  const user = currentUser();
-  if (choice === 'take_incoming' || choice === 'clear') {
-    const value = choice === 'clear' ? null : conflict.incoming_value;
-    const existing = db
-      .prepare(`SELECT * FROM internal_milestones WHERE permit_record_id = ? AND key = ?`)
-      .get(conflict.permit_record_id, conflict.field);
-    if (existing) {
-      recordChange(
-        conflict.permit_record_id,
-        `milestone:${conflict.field}`,
-        existing.value,
-        value,
-        user,
-        'conflict_resolve'
-      );
-      db.prepare(
-        `UPDATE internal_milestones SET value = ?, last_import_value = ?, edited_in_app = 0, source = 'import'
-         WHERE permit_record_id = ? AND key = ?`
-      ).run(value, choice === 'clear' ? existing.last_import_value : value, conflict.permit_record_id, conflict.field);
-    }
+  // All resolutions require version — operator decisions must not race with other mutations
+  if (
+    req.body?.expected_row_version == null ||
+    req.body?.expected_row_version === '' ||
+    Number.isNaN(Number(req.body.expected_row_version))
+  ) {
+    return res.status(400).json({
+      error: 'expected_row_version_required',
+      message:
+        'Conflict resolution requires expected_row_version from the open permit detail.',
+      server_row_version: db
+        .prepare('SELECT row_version FROM permit_records WHERE id = ?')
+        .get(conflict.permit_record_id)?.row_version,
+    });
   }
-  db.prepare(
-    `UPDATE import_conflicts SET status = 'resolved', resolution = ? WHERE id = ?`
-  ).run(choice, id);
-  res.json({ ok: true });
+  const expected = Number(req.body.expected_row_version);
+  const user = currentUser();
+  let claimResult = { ok: true };
+
+  try {
+    const tx = db.transaction(() => {
+      const claim = claimPermitWrite(conflict.permit_record_id, expected);
+      claimResult = claim;
+      if (!claim.ok) return;
+
+      const stillPending = db.prepare(`SELECT status FROM import_conflicts WHERE id = ?`).get(id);
+      if (!stillPending || stillPending.status !== 'pending') {
+        throw Object.assign(new Error('conflict_already_resolved'), { status: 409 });
+      }
+
+      if (choice === 'take_incoming' || choice === 'clear') {
+        const value = choice === 'clear' ? null : conflict.incoming_value;
+        const existing = db
+          .prepare(`SELECT * FROM internal_milestones WHERE permit_record_id = ? AND key = ?`)
+          .get(conflict.permit_record_id, conflict.field);
+        if (existing && String(existing.value ?? '') !== String(value ?? '')) {
+          recordChange(
+            conflict.permit_record_id,
+            `milestone:${conflict.field}`,
+            existing.value,
+            value,
+            user,
+            'conflict_resolve'
+          );
+          db.prepare(
+            `UPDATE internal_milestones SET value = ?, last_import_value = ?, edited_in_app = 0, source = 'import'
+             WHERE permit_record_id = ? AND key = ?`
+          ).run(
+            value,
+            choice === 'clear' ? existing.last_import_value : value,
+            conflict.permit_record_id,
+            conflict.field
+          );
+        }
+      }
+
+      const marked = db
+        .prepare(
+          `UPDATE import_conflicts SET status = 'resolved', resolution = ? WHERE id = ? AND status = 'pending'`
+        )
+        .run(choice, id);
+      if (!marked.changes) {
+        throw Object.assign(new Error('conflict_already_resolved'), { status: 409 });
+      }
+    });
+    tx();
+  } catch (err) {
+    if (err.status === 409 || err.message === 'conflict_already_resolved') {
+      return res.status(409).json({
+        error: 'conflict_already_resolved',
+        message: 'This import conflict was already resolved.',
+      });
+    }
+    throw err;
+  }
+
+  if (claimResult?.missingVersion) {
+    return res.status(400).json({
+      error: 'expected_row_version_required',
+      message: 'expected_row_version is required for conflict resolution.',
+    });
+  }
+  if (!claimResult.ok) {
+    return res.status(409).json({
+      error: 'stale_write',
+      message:
+        'Permit changed since you loaded it. Conflict was not applied — reload and decide again.',
+      permit: db.prepare(`${PERMIT_SQL} WHERE p.id = ?`).get(conflict.permit_record_id),
+      server_row_version: claimResult.permit?.row_version,
+      client_expected_row_version: expected,
+    });
+  }
+
+  updateLotReadiness(conflict.permit_record_id);
+  rebuildAttention();
+  const permit = db.prepare(`${PERMIT_SQL} WHERE p.id = ?`).get(conflict.permit_record_id);
+  const milestone = db
+    .prepare(`SELECT * FROM internal_milestones WHERE permit_record_id = ? AND key = ?`)
+    .get(conflict.permit_record_id, conflict.field);
+  res.json({
+    ok: true,
+    resolution: choice,
+    row_version: permit?.row_version,
+    permit,
+    milestone,
+  });
 });
 
 app.get('/api/connectors', (_req, res) => {
@@ -976,9 +1104,10 @@ app.get('/api/reviews', (_req, res) => {
   });
 });
 
-function workbookPreviewResponse(parsed, filename) {
+function workbookPreviewResponse(parsed, filename, previewId = null) {
   return {
     filename,
+    previewId,
     sheets: parsed.sheets,
     ignoredSheets: parsed.ignoredSheets,
     archivedSheets: parsed.ignoredSheets,
@@ -1002,6 +1131,13 @@ function workbookPreviewResponse(parsed, filename) {
   };
 }
 
+function importErrorPayload(e) {
+  return {
+    error: e.message || String(e),
+    code: e.code || 'import_error',
+  };
+}
+
 app.post('/api/import/workbook/preview', (req, res) => {
   upload.single('file')(req, res, (err) => {
     if (err) {
@@ -1010,16 +1146,22 @@ app.post('/api/import/workbook/preview', (req, res) => {
         error: tooLarge
           ? 'Workbook exceeds the 20 MB upload limit. Split the file or contact the owner.'
           : err.message || 'Upload failed',
+        code: tooLarge ? 'file_too_large' : 'upload_failed',
       });
     }
     if (!req.file) return res.status(400).json({ error: 'file required — upload a .xlsx workbook' });
     try {
       const parsed = parseWorkbookBuffer(req.file.buffer);
-      res.json(workbookPreviewResponse(parsed, req.file.originalname));
+      assertRecognizedWorkbook(parsed, req.file.originalname);
+      const previewId = storeWorkbookPreview(
+        req.file.buffer,
+        req.file.originalname,
+        parsed,
+        currentUser()
+      );
+      res.json(workbookPreviewResponse(parsed, req.file.originalname, previewId));
     } catch (e) {
-      res.status(400).json({
-        error: `Could not parse workbook: ${e.message || e}. Use a valid .xlsx with the Permit Tracker sheet layout.`,
-      });
+      res.status(400).json(importErrorPayload(e));
     }
   });
 });
@@ -1032,11 +1174,30 @@ app.post('/api/import/workbook/commit', (req, res) => {
         error: tooLarge
           ? 'Workbook exceeds the 20 MB upload limit.'
           : err.message || 'Upload failed',
+        code: tooLarge ? 'file_too_large' : 'upload_failed',
       });
     }
     try {
       let buffer = req.file?.buffer;
-      if (!buffer && req.body?.useStoreWorkbook) {
+      let filename = req.file?.originalname || 'upload.xlsx';
+      let parsed = null;
+      const previewId = req.body?.previewId || req.query?.previewId;
+
+      if (previewId) {
+        prunePreviewSessions();
+        const sess = workbookPreviewSessions.get(String(previewId));
+        if (!sess) {
+          return res.status(400).json({
+            error:
+              'Preview session expired or unknown. Preview the workbook again, then commit that preview.',
+            code: 'preview_expired',
+          });
+        }
+        buffer = sess.buffer;
+        filename = sess.filename;
+        parsed = sess.parsed;
+        workbookPreviewSessions.delete(String(previewId));
+      } else if (!buffer && req.body?.useStoreWorkbook) {
         if (!SOURCE_WORKBOOK || !fs.existsSync(SOURCE_WORKBOOK)) {
           return res.status(404).json({
             error:
@@ -1044,16 +1205,27 @@ app.post('/api/import/workbook/commit', (req, res) => {
           });
         }
         buffer = fs.readFileSync(SOURCE_WORKBOOK);
+        filename = path.basename(SOURCE_WORKBOOK);
       }
-      if (!buffer) return res.status(400).json({ error: 'file or useStoreWorkbook required' });
-      const parsed = parseWorkbookBuffer(buffer);
+      if (!buffer) {
+        return res.status(400).json({
+          error: 'file, previewId, or useStoreWorkbook required',
+        });
+      }
+      if (!parsed) {
+        parsed = parseWorkbookBuffer(buffer);
+        assertRecognizedWorkbook(parsed, filename);
+      }
       const summary = commitWorkbookParse(parsed, { changedBy: currentUser() });
       rebuildAttention();
-      res.json({ summary, sectionCount: parsed.permitTracker.sections.length });
-    } catch (e) {
-      res.status(400).json({
-        error: `Could not import workbook: ${e.message || e}`,
+      res.json({
+        summary,
+        sectionCount: parsed.permitTracker.sections.length,
+        filename,
+        changedBy: currentUser(),
       });
+    } catch (e) {
+      res.status(400).json(importErrorPayload(e));
     }
   });
 });
@@ -1067,50 +1239,91 @@ app.post('/api/import/workbook/store', (_req, res) => {
     });
   }
   try {
-    const { summary } = importWorkbookFile(SOURCE_WORKBOOK);
+    const actor = currentUser();
+    const { summary } = importWorkbookFile(SOURCE_WORKBOOK, path.basename(SOURCE_WORKBOOK), {
+      changedBy: actor,
+    });
     rebuildAttention();
-    res.json({ summary, path: SOURCE_WORKBOOK });
+    res.json({ summary, path: SOURCE_WORKBOOK, changedBy: actor });
   } catch (e) {
-    res.status(400).json({ error: `Could not import stored workbook: ${e.message || e}` });
+    res.status(400).json(importErrorPayload(e));
   }
 });
 
-// Legacy aliases — same handlers
+// Legacy aliases — same validation + attribution as workbook routes
 app.post('/api/import/gospel/preview', upload.single('file'), (req, res) => {
   if (!req.file) return res.status(400).json({ error: 'file required' });
-  const parsed = parseWorkbookBuffer(req.file.buffer);
-  res.json(workbookPreviewResponse(parsed, req.file.originalname));
+  try {
+    const parsed = parseWorkbookBuffer(req.file.buffer);
+    assertRecognizedWorkbook(parsed, req.file.originalname);
+    const previewId = storeWorkbookPreview(
+      req.file.buffer,
+      req.file.originalname,
+      parsed,
+      currentUser()
+    );
+    res.json(workbookPreviewResponse(parsed, req.file.originalname, previewId));
+  } catch (e) {
+    res.status(400).json(importErrorPayload(e));
+  }
 });
 
 app.post('/api/import/gospel/commit', upload.single('file'), (req, res) => {
-  let buffer = req.file?.buffer;
-  if (!buffer && (req.body?.useStoreGospel || req.body?.useStoreWorkbook)) {
-    if (!fs.existsSync(SOURCE_WORKBOOK)) {
-      return res.status(404).json({ error: 'Source workbook not found in store' });
+  try {
+    let buffer = req.file?.buffer;
+    let filename = req.file?.originalname || 'upload.xlsx';
+    let parsed = null;
+    const previewId = req.body?.previewId;
+    if (previewId) {
+      const sess = workbookPreviewSessions.get(String(previewId));
+      if (!sess) {
+        return res.status(400).json({ error: 'Preview session expired', code: 'preview_expired' });
+      }
+      buffer = sess.buffer;
+      filename = sess.filename;
+      parsed = sess.parsed;
+      workbookPreviewSessions.delete(String(previewId));
+    } else if (!buffer && (req.body?.useStoreGospel || req.body?.useStoreWorkbook)) {
+      if (!fs.existsSync(SOURCE_WORKBOOK)) {
+        return res.status(404).json({ error: 'Source workbook not found in store' });
+      }
+      buffer = fs.readFileSync(SOURCE_WORKBOOK);
+      filename = path.basename(SOURCE_WORKBOOK);
     }
-    buffer = fs.readFileSync(SOURCE_WORKBOOK);
+    if (!buffer) return res.status(400).json({ error: 'file or useStoreWorkbook required' });
+    if (!parsed) {
+      parsed = parseWorkbookBuffer(buffer);
+      assertRecognizedWorkbook(parsed, filename);
+    }
+    const summary = commitWorkbookParse(parsed, { changedBy: currentUser() });
+    rebuildAttention();
+    res.json({
+      summary,
+      sectionCount: parsed.permitTracker.sections.length,
+      changedBy: currentUser(),
+    });
+  } catch (e) {
+    res.status(400).json(importErrorPayload(e));
   }
-  if (!buffer) return res.status(400).json({ error: 'file or useStoreWorkbook required' });
-  const parsed = parseWorkbookBuffer(buffer);
-  const summary = commitWorkbookParse(parsed, { changedBy: currentUser() });
-  rebuildAttention();
-  res.json({ summary, sectionCount: parsed.permitTracker.sections.length });
 });
 
 app.post('/api/import/gospel/store', (_req, res) => {
   if (!fs.existsSync(SOURCE_WORKBOOK)) {
     return res.status(404).json({ error: 'Source workbook not found' });
   }
-  const { summary } = importWorkbookFile(SOURCE_WORKBOOK);
+  const actor = currentUser();
+  const { summary } = importWorkbookFile(SOURCE_WORKBOOK, path.basename(SOURCE_WORKBOOK), {
+    changedBy: actor,
+  });
   rebuildAttention();
-  res.json({ summary, path: SOURCE_WORKBOOK });
+  res.json({ summary, path: SOURCE_WORKBOOK, changedBy: actor });
 });
 
 app.get('/api/export.xlsx', (req, res) => {
   const includeReviewed = req.query.includeReviewed === '1' || req.query.includeReviewed === 'true';
   const filters = normalizePermitFilters(req.query);
-  // selectedIds: comma-separated — selected-row export. When set, export those IDs
-  // (still subject to import-origin + any other filters). Filtered-row export = omit selectedIds.
+  // selectedIds: comma-separated selected-row export — independent of table filters.
+  // Filtered-row export = omit selectedIds (uses q + filters only).
   let selectedIds = null;
   if (req.query.selectedIds != null && String(req.query.selectedIds).trim() !== '') {
     selectedIds = String(req.query.selectedIds)
@@ -1123,9 +1336,13 @@ app.get('/api/export.xlsx', (req, res) => {
     includeReviewedCandidates: includeReviewed,
     filters,
     selectedIds,
+    selectedOnly: Boolean(selectedIds?.length),
   });
   res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   res.setHeader('Content-Disposition', 'attachment; filename="permit-ledger-structured-export.xlsx"');
+  if (selectedIds?.length) {
+    res.setHeader('X-Permit-Export-Selected-Count', String(selectedIds.length));
+  }
   res.send(Buffer.from(buf));
 });
 
@@ -1502,9 +1719,14 @@ app.post('/api/milestones/:permitId/waiver', (req, res) => {
        created_at = datetime('now')`
   ).run(permitId, milestone_key, reason, currentUser());
   recordChange(permitId, `waiver:${milestone_key}`, '', reason, currentUser(), 'waiver');
+  bumpPermitRowVersion(permitId);
   updateLotReadiness(permitId);
   rebuildAttention();
-  res.json({ ok: true, readiness: getStoredAssessment(permitId) });
+  res.json({
+    ok: true,
+    readiness: getStoredAssessment(permitId),
+    permit: db.prepare(`${PERMIT_SQL} WHERE p.id = ?`).get(permitId),
+  });
 });
 
 app.post('/api/milestones/:permitId/waiver/revoke', (req, res) => {
@@ -1516,9 +1738,14 @@ app.post('/api/milestones/:permitId/waiver/revoke', (req, res) => {
      WHERE permit_record_id = ? AND milestone_key = ? AND revoked_at IS NULL`
   ).run(currentUser(), permitId, milestone_key);
   recordChange(permitId, `waiver_revoke:${milestone_key}`, 'active', 'revoked', currentUser(), 'waiver');
+  bumpPermitRowVersion(permitId);
   updateLotReadiness(permitId);
   rebuildAttention();
-  res.json({ ok: true, readiness: getStoredAssessment(permitId) });
+  res.json({
+    ok: true,
+    readiness: getStoredAssessment(permitId),
+    permit: db.prepare(`${PERMIT_SQL} WHERE p.id = ?`).get(permitId),
+  });
 });
 
 app.post('/api/seed', requireAuth, requireOwner, (req, res) => {

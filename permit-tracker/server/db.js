@@ -636,4 +636,23 @@ export function resolveAttentionByCondition(conditionKey) {
   ).run(conditionKey);
 }
 
+/** Resolve open source-failure Attention for a permit (all IDs). Preserves rows as history. */
+export function resolveSourceAttentionForPermit(permitId) {
+  db.prepare(
+    `UPDATE attention_events SET resolved_at = datetime('now')
+     WHERE permit_record_id = ?
+       AND kind IN ('source_missing', 'check_failed')
+       AND resolved_at IS NULL`
+  ).run(Number(permitId));
+}
+
+/** Resolve condition keys matching prefix (e.g. source:12:). */
+export function resolveAttentionByConditionPrefix(prefix) {
+  if (!prefix) return;
+  db.prepare(
+    `UPDATE attention_events SET resolved_at = datetime('now')
+     WHERE resolved_at IS NULL AND condition_key LIKE ?`
+  ).run(`${prefix}%`);
+}
+
 migrate();

@@ -1,4 +1,31 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
+import {
+  classifyFieldDiffs,
+  buildPatchFromDecisions,
+  isPermitDraftDirty,
+  dirtyPermitPatch,
+} from './draftMerge.js';
+
+const INTERNAL_STATUS_OPTIONS = [
+  { value: 'watching', label: 'Watching' },
+  { value: 'needs_followup', label: 'Needs follow-up' },
+  { value: 'done', label: 'Done' },
+];
+
+const JURISDICTION_OPTIONS = [
+  { value: 'fairfax_county', label: 'Fairfax County' },
+  { value: 'loudoun_county', label: 'Loudoun County (unsupported)' },
+  { value: 'prince_william_county', label: 'Prince William County (unsupported)' },
+  { value: 'unresolved', label: 'Unresolved / other' },
+];
+
+function statusLabel(code) {
+  return INTERNAL_STATUS_OPTIONS.find((o) => o.value === code)?.label || code || '—';
+}
+
+function jurisdictionLabel(code) {
+  return JURISDICTION_OPTIONS.find((o) => o.value === code)?.label || code || '—';
+}
 
 async function api(path, options = {}) {
   const headers = {
@@ -46,7 +73,9 @@ export default function App() {
   const [detail, setDetail] = useState(null);
   /** Last clean server copy — drafts live in `detail`; never auto-overwrite with server on conflict. */
   const [detailServer, setDetailServer] = useState(null);
-  const [detailConflict, setDetailConflict] = useState(null); // { server, draft, reason }
+  const [detailConflict, setDetailConflict] = useState(null); // { server, draft, base, reason }
+  const [fieldDecisions, setFieldDecisions] = useState({}); // { field: 'draft'|'server' }
+  const [navGuard, setNavGuard] = useState(null); // { type, targetId?, nextTab?, proceed? }
   const [milestones, setMilestones] = useState([]);
   const [officialIds, setOfficialIds] = useState([]);
   const [history, setHistory] = useState([]);
@@ -89,7 +118,7 @@ export default function App() {
   const [attention, setAttention] = useState([]);
   const [bulk, setBulk] = useState({ internal_status: '', owner: '' });
   const [message, setMessage] = useState('');
-  const [importPreview, setImportPreview] = useState(null);
+  const [importPreview, setImportPreview] = useState(null); // includes previewId for commit-from-preview
   const [schedule, setSchedule] = useState(null);
   const [conflicts, setConflicts] = useState([]);
   const [sources, setSources] = useState([]);
@@ -151,10 +180,23 @@ export default function App() {
     });
   }
 
-  async function openDetail(id) {
+  function detailIsDirty() {
+    return isPermitDraftDirty(detail, detailServer);
+  }
+
+  async function openDetail(id, { force = false } = {}) {
+    if (
+      !force &&
+      detail?.id &&
+      Number(detail.id) !== Number(id) &&
+      detailIsDirty()
+    ) {
+      setNavGuard({ type: 'switch', targetId: id });
+      return;
+    }
     const requestId = ++detailRequestSeq.current;
-    // Preserve prior selection across reload (demo/contact actions must not wipe it).
-    const keepId = selectedPropertyId;
+    // Preserve prior selection across reload only when staying on same permit
+    const keepId = Number(detail?.id) === Number(id) ? selectedPropertyId : null;
     // Clear record-specific form state immediately to avoid carryover while loading
     setPropertyForm({ ...emptyPropertyForm });
     setSelectedPropertyId(null);
@@ -175,6 +217,8 @@ export default function App() {
     setDetail(data.permit);
     setDetailServer(data.permit);
     setDetailConflict(null);
+    setFieldDecisions({});
+    setNavGuard(null);
     setMilestones(data.milestones);
     setOfficialIds(data.officialIds);
     setHistory(data.history);
@@ -195,6 +239,34 @@ export default function App() {
       applyPropertyToForm(props[0]);
     } else {
       applyPropertyToForm(null);
+    }
+  }
+
+  async function requestTabChange(nextTab) {
+    if (detailIsDirty() && tab !== nextTab) {
+      setNavGuard({ type: 'tab', nextTab });
+      return;
+    }
+    setMessage('');
+    setTab(nextTab);
+  }
+
+  async function discardDraftAndProceed() {
+    const g = navGuard;
+    setNavGuard(null);
+    setDetailConflict(null);
+    setFieldDecisions({});
+    if (g?.type === 'switch' && g.targetId != null) {
+      await openDetail(g.targetId, { force: true });
+    } else if (g?.type === 'tab') {
+      if (detail?.id) await openDetail(detail.id, { force: true });
+      setTab(g.nextTab);
+    } else if (g?.type === 'signout') {
+      await api('/api/auth/logout', { method: 'POST' });
+      setAuthGate({ enabled: true, user: null });
+      setDetail(null);
+      setDetailServer(null);
+      setMessage('Signed out');
     }
   }
 
@@ -531,12 +603,14 @@ export default function App() {
       const server = e.body?.permit;
       setDetailConflict({
         server,
-        draft: detail,
-        reason: e.body?.message || 'Server copy changed; draft kept — reload deliberately.',
+        draft: { ...detail },
+        base: detailServer ? { ...detailServer } : null,
+        reason: e.body?.message || 'Server copy changed; draft kept — resolve field by field.',
       });
+      setFieldDecisions({});
       setMessage(
         e.body?.message ||
-          'Stale save blocked. Your draft was kept; reload server values or keep editing, then save with the new version.'
+          'Stale save blocked. Choose server vs draft for each changed field, then Save decided fields.'
       );
       return true;
     }
@@ -603,6 +677,16 @@ export default function App() {
       }
     })();
   }, []);
+
+  useEffect(() => {
+    function onBeforeUnload(ev) {
+      if (!isPermitDraftDirty(detail, detailServer)) return;
+      ev.preventDefault();
+      ev.returnValue = '';
+    }
+    window.addEventListener('beforeunload', onBeforeUnload);
+    return () => window.removeEventListener('beforeunload', onBeforeUnload);
+  }, [detail, detailServer]);
 
   useEffect(() => {
     // Wait for auth bootstrap; when invite-only, do not hit protected APIs until signed in.
@@ -722,30 +806,30 @@ export default function App() {
     );
   }
 
-  async function saveDetail() {
+  async function saveDetail({ patchOverride, expectedVersion } = {}) {
+    if (!detail) return;
     setBusy(true);
     try {
-      // Official status fields are read-only — omit them
-      const {
-        official_status: _os,
-        source_native_status: _sns,
-        ...rest
-      } = detail;
+      // Only send dirty fields (or explicit merge patch) — never wipe unrelated server values
+      const patch =
+        patchOverride ||
+        dirtyPermitPatch(detail, detailServer);
+      if (!Object.keys(patch).length) {
+        setMessage('No local changes to save.');
+        setBusy(false);
+        return;
+      }
+      const version =
+        expectedVersion ??
+        detailConflict?.server?.row_version ??
+        detail.row_version ??
+        1;
       const data = await api(`/api/permits/${detail.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          primary_official_id: rest.primary_official_id,
-          jurisdiction_code: rest.jurisdiction_code,
-          internal_status: rest.internal_status,
-          owner: rest.owner,
-          next_action: rest.next_action,
-          next_action_due: rest.next_action_due,
-          source_url: rest.source_url,
-          permit_kind: rest.permit_kind,
-          jurisdiction_confirmed: Boolean(rest.jurisdiction_confirmed),
-          expected_row_version: detail.row_version ?? 1,
-          expected_updated_at: detail.updated_at,
+          ...patch,
+          expected_row_version: version,
         }),
       });
       setMessage('Saved.');
@@ -753,14 +837,47 @@ export default function App() {
         setDetail(data.permit);
         setDetailServer(data.permit);
         setDetailConflict(null);
+        setFieldDecisions({});
       }
       await refreshLists();
-      await openDetail(detail.id);
+      await openDetail(detail.id, { force: true });
+      if (navGuard?.type === 'switch' && navGuard.targetId != null) {
+        const target = navGuard.targetId;
+        setNavGuard(null);
+        await openDetail(target, { force: true });
+      } else if (navGuard?.type === 'tab') {
+        const next = navGuard.nextTab;
+        setNavGuard(null);
+        setTab(next);
+      }
     } catch (e) {
       handleStaleSave(e);
       await refreshLists();
     } finally {
       setBusy(false);
+    }
+  }
+
+  async function saveReconciledFields() {
+    if (!detailConflict?.server || !detail) return;
+    const base = detailConflict.base || detailServer;
+    const diffs = classifyFieldDiffs(base, detailConflict.draft || detail, detailConflict.server);
+    try {
+      const patch = buildPatchFromDecisions(diffs, fieldDecisions, detailConflict.server);
+      // Apply draft-only + chosen draft fields onto form first for local consistency
+      const merged = { ...detailConflict.server };
+      for (const row of diffs) {
+        if (row.status === 'draft_only' || (row.status === 'conflict' && fieldDecisions[row.key] === 'draft')) {
+          merged[row.key] = row.draft;
+        }
+      }
+      setDetail({ ...merged, row_version: detailConflict.server.row_version });
+      await saveDetail({
+        patchOverride: patch,
+        expectedVersion: detailConflict.server.row_version,
+      });
+    } catch (e) {
+      setMessage(String(e.message || e));
     }
   }
 
@@ -832,27 +949,22 @@ export default function App() {
     setSelected(new Set());
     setMessage(`Bulk updated ${data.changed ?? selectedIds.length} of ${selectedIds.length}.`);
     await refreshLists();
-    // Do not silently replace an unsaved draft. Surface conflict; require deliberate reload.
+    // Do not silently replace an unsaved draft. Surface field-level reconcile.
     if (detail?.id && selectedIds.includes(detail.id)) {
       const serverRow = (data.permits || []).find((p) => p.id === detail.id);
-      const dirty =
-        detailServer &&
-        (detail.internal_status !== detailServer.internal_status ||
-          detail.owner !== detailServer.owner ||
-          detail.next_action !== detailServer.next_action ||
-          detail.jurisdiction_code !== detailServer.jurisdiction_code ||
-          Boolean(detail.jurisdiction_confirmed) !== Boolean(detailServer.jurisdiction_confirmed));
-      if (dirty && serverRow) {
+      if (detailIsDirty() && serverRow) {
         setDetailConflict({
           server: serverRow,
-          draft: detail,
-          reason: 'Bulk update changed this row while you had unsaved edits. Draft kept.',
+          draft: { ...detail },
+          base: detailServer ? { ...detailServer } : null,
+          reason: 'Bulk update changed this row while you had unsaved edits. Resolve fields before Save.',
         });
+        setFieldDecisions({});
         setMessage(
-          'Bulk updated selection. Open detail has unsaved edits — draft kept. Reload server values or keep editing, then Save.'
+          'Bulk updated selection. Open detail has unsaved edits — choose server vs draft per field, then Save decided fields.'
         );
       } else {
-        await openDetail(detail.id);
+        await openDetail(detail.id, { force: true });
       }
     }
   }
@@ -874,21 +986,73 @@ export default function App() {
   }
 
   async function previewFile(file) {
-    const fd = new FormData();
-    fd.append('file', file);
-    const data = await api('/api/import/workbook/preview', { method: 'POST', body: fd });
-    setImportPreview(data);
-    setTab('import');
-  }
-
-  async function commitFile(file) {
-    const fd = new FormData();
-    fd.append('file', file);
     setBusy(true);
     try {
+      const fd = new FormData();
+      fd.append('file', file);
+      const data = await api('/api/import/workbook/preview', { method: 'POST', body: fd });
+      setImportPreview(data);
+      setTab('import');
+      setMessage(
+        `Preview ready: ${data.filename || file.name} · ${data.sectionCount} sections · ${data.rowCount} rows. Commit this preview without re-selecting the file.`
+      );
+    } catch (e) {
+      setImportPreview(null);
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function commitPreviewedWorkbook() {
+    if (!importPreview?.previewId) {
+      setMessage('Preview a workbook first, then commit that exact preview.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const fd = new FormData();
+      fd.append('previewId', importPreview.previewId);
       const data = await api('/api/import/workbook/commit', { method: 'POST', body: fd });
-      setMessage(`Committed: ${JSON.stringify(data.summary)}`);
+      setMessage(
+        `Committed ${data.filename || importPreview.filename}: ${data.summary?.permits_created ?? 0} created, ${data.summary?.permits_updated ?? 0} updated` +
+          (data.changedBy ? ` · by ${data.changedBy}` : '')
+      );
+      setImportPreview(null);
       await refreshLists();
+    } catch (e) {
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function resolveImportConflict(conflict, resolution) {
+    setBusy(true);
+    try {
+      let version = detail?.id === conflict.permit_record_id ? detail.row_version : null;
+      if (version == null && conflict.permit_record_id) {
+        const d = await api(`/api/permits/${conflict.permit_record_id}`);
+        version = d.permit?.row_version;
+      }
+      const data = await api(`/api/conflicts/${conflict.id}/resolve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          resolution,
+          expected_row_version: version ?? 1,
+        }),
+      });
+      setMessage(`Conflict ${conflict.field}: ${resolution} (version ${data.row_version})`);
+      setConflicts((await api('/api/conflicts')).conflicts);
+      setAttention((await api('/api/attention')).items);
+      if (detail?.id === conflict.permit_record_id) {
+        await openDetail(detail.id, { force: true });
+      }
+      await refreshLists();
+    } catch (e) {
+      handleStaleSave(e);
+      setMessage(String(e.message || e));
     } finally {
       setBusy(false);
     }
@@ -975,10 +1139,7 @@ export default function App() {
               role="tab"
               aria-selected={tab === t.id}
               className={tab === t.id ? 'active' : ''}
-              onClick={() => {
-                setTab(t.id);
-                setMessage('');
-              }}
+              onClick={() => requestTabChange(t.id)}
             >
               {t.label}
             </button>
@@ -990,13 +1151,19 @@ export default function App() {
               {authGate.user.email}
               {authGate.user.role ? ` · ${authGate.user.role}` : ''}
             </span>
+            {detailIsDirty() ? <span className="pill warn">Unsaved edits</span> : null}
             <button
               type="button"
               className="btn"
-              onClick={async () => {
-                await api('/api/auth/logout', { method: 'POST' });
-                setAuthGate({ enabled: true, user: null });
-                setMessage('Signed out');
+              onClick={() => {
+                if (detailIsDirty()) {
+                  setNavGuard({ type: 'signout' });
+                  return;
+                }
+                api('/api/auth/logout', { method: 'POST' }).then(() => {
+                  setAuthGate({ enabled: true, user: null });
+                  setMessage('Signed out');
+                });
               }}
             >
               Sign out
@@ -1011,42 +1178,99 @@ export default function App() {
         AHJ) → <strong>Review</strong> Attention / structured export. Owner source setup (activate
         Fairfax PLUS) is separate. Building use ≠ work type.
       </div>
+      {navGuard ? (
+        <div className="banner warn" role="dialog" aria-label="Unsaved changes">
+          You have unsaved edits on this permit.
+          <div className="empty-actions" style={{ marginTop: 8 }}>
+            <button
+              type="button"
+              className="btn primary"
+              disabled={busy}
+              onClick={async () => {
+                await saveDetail();
+              }}
+            >
+              Save
+            </button>
+            <button type="button" className="btn" onClick={discardDraftAndProceed}>
+              Discard
+            </button>
+            <button type="button" className="btn ghost" onClick={() => setNavGuard(null)}>
+              Cancel
+            </button>
+          </div>
+        </div>
+      ) : null}
       {detailConflict ? (
         <div className="banner warn" role="alert">
-          Conflict: {detailConflict.reason} Server version{' '}
-          {detailConflict.server?.row_version ?? '—'} · your draft kept in the form.
+          <div>
+            Conflict: {detailConflict.reason} Server version{' '}
+            {detailConflict.server?.row_version ?? '—'}. Choose server vs draft for each field that
+            both sides changed; unrelated server fields stay unless you choose draft.
+          </div>
+          <div className="table-wrap" style={{ marginTop: 8 }}>
+            <table>
+              <thead>
+                <tr>
+                  <th>Field</th>
+                  <th>Your draft</th>
+                  <th>Server</th>
+                  <th>Decision</th>
+                </tr>
+              </thead>
+              <tbody>
+                {classifyFieldDiffs(
+                  detailConflict.base || detailServer,
+                  detailConflict.draft || detail,
+                  detailConflict.server
+                )
+                  .filter((r) => r.status !== 'unchanged')
+                  .map((row) => (
+                    <tr key={row.key}>
+                      <td>{row.label}</td>
+                      <td className="mono">{String(row.draft ?? '∅')}</td>
+                      <td className="mono">{String(row.server ?? '∅')}</td>
+                      <td>
+                        {row.status === 'conflict' ? (
+                          <select
+                            value={fieldDecisions[row.key] || ''}
+                            onChange={(e) =>
+                              setFieldDecisions((d) => ({ ...d, [row.key]: e.target.value }))
+                            }
+                          >
+                            <option value="">Choose…</option>
+                            <option value="draft">Keep draft</option>
+                            <option value="server">Take server</option>
+                          </select>
+                        ) : row.status === 'draft_only' ? (
+                          <span className="muted">Will save draft</span>
+                        ) : (
+                          <span className="muted">Keep server</span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+              </tbody>
+            </table>
+          </div>
           <div className="empty-actions" style={{ marginTop: 8 }}>
             <button
               type="button"
               className="btn"
               onClick={async () => {
-                if (detailConflict.server?.id) await openDetail(detailConflict.server.id);
+                if (detailConflict.server?.id) await openDetail(detailConflict.server.id, { force: true });
                 else setDetailConflict(null);
               }}
             >
-              Reload server values
+              Discard draft · reload server
             </button>
             <button
               type="button"
               className="btn primary"
-              onClick={() => {
-                // Keep draft; adopt server row_version only so a subsequent Save can be attempted
-                // after deliberate field merge by the operator — do not auto-apply draft onto server.
-                if (detailConflict.server && detail) {
-                  setDetail({
-                    ...detail,
-                    row_version: detailConflict.server.row_version,
-                    updated_at: detailConflict.server.updated_at,
-                  });
-                  setDetailServer(detailConflict.server);
-                }
-                setDetailConflict(null);
-                setMessage(
-                  'Draft kept with updated version token. Review fields against server before Save — Save will not auto-merge.'
-                );
-              }}
+              disabled={busy}
+              onClick={saveReconciledFields}
             >
-              Keep editing draft
+              Save decided fields
             </button>
           </div>
         </div>
@@ -1094,9 +1318,11 @@ export default function App() {
               onChange={(e) => setFilters((f) => ({ ...f, internal_status: e.target.value }))}
             >
               <option value="">Internal status</option>
-              <option value="watching">watching</option>
-              <option value="needs_followup">needs_followup</option>
-              <option value="done">done</option>
+              {INTERNAL_STATUS_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
             </select>
             <select
               value={filters.use_classification || ''}
@@ -1273,13 +1499,10 @@ export default function App() {
                 className="btn"
                 href={`/api/export.xlsx?${new URLSearchParams({
                   selectedIds: selectedIds.join(','),
-                  ...Object.fromEntries(
-                    Object.entries({ q, ...filters }).filter(([, v]) => v != null && String(v) !== '')
-                  ),
                 })}`}
-                title="Selected-row export: only checked rows (still import-origin). Distinct from filtered-row export."
+                title="Exports the checked rows only — ignores current search/filters. Count matches selection."
               >
-                Export selected ({selectedIds.length})
+                Export selected ({selectedIds.length} rows · ignores filters)
               </a>
             ) : null}
             <button
@@ -1300,9 +1523,11 @@ export default function App() {
               onChange={(e) => setBulk((b) => ({ ...b, internal_status: e.target.value }))}
             >
               <option value="">Bulk internal status</option>
-              <option value="watching">watching</option>
-              <option value="needs_followup">needs_followup</option>
-              <option value="done">done</option>
+              {INTERNAL_STATUS_OPTIONS.map((o) => (
+                <option key={o.value} value={o.value}>
+                  {o.label}
+                </option>
+              ))}
             </select>
             <input
               type="text"
@@ -1375,6 +1600,9 @@ export default function App() {
                       key={p.id}
                       className={selected.has(p.id) || detail?.id === p.id ? 'selected' : ''}
                       onClick={() => openDetail(p.id)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter') openDetail(p.id);
+                      }}
                     >
                       <td onClick={(e) => e.stopPropagation()}>
                         <input
@@ -1411,7 +1639,7 @@ export default function App() {
                             p.jurisdiction_code === 'fairfax_county' ? 'live' : 'warn'
                           }`}
                         >
-                          {p.jurisdiction_code}
+                          {jurisdictionLabel(p.jurisdiction_code)}
                           {p.jurisdiction_confirmed ? '' : ' · unconfirmed'}
                         </span>
                       </td>
@@ -1431,15 +1659,23 @@ export default function App() {
                       </td>
                       <td>
                         <span className={`pill ${readinessClass(p.readiness_state)}`}>
-                          {readinessLabel(p.readiness_state)}
+                          Workbook: {readinessLabel(p.readiness_state)}
                         </span>
+                        <div className="muted">
+                          AHJ:{' '}
+                          {p.official_status
+                            ? p.official_status
+                            : p.primary_official_id
+                              ? 'Not verified'
+                              : 'No official ID'}
+                        </div>
                         <div className="muted">
                           {(p.readiness_summary || '').slice(0, 80)}
                           {(p.readiness_summary || '').length > 80 ? '…' : ''}
                         </div>
                       </td>
                       <td>
-                        <div>{p.internal_status}</div>
+                        <div>{statusLabel(p.internal_status)}</div>
                         <div className="muted">{p.owner || '—'}</div>
                       </td>
                       <td>
@@ -1453,31 +1689,119 @@ export default function App() {
             </div>
 
             <aside className="panel stack">
-              <h2>Permit detail</h2>
+              <h2>
+                Permit detail
+                {detailIsDirty() ? <span className="pill warn"> Unsaved</span> : null}
+              </h2>
               {!detail ? (
                 <p className="muted">Select a row.</p>
               ) : (
                 <>
+                  <div className="toolbar sticky-save">
+                    <button
+                      type="button"
+                      className="btn primary"
+                      disabled={busy || Boolean(detailConflict)}
+                      onClick={() => saveDetail()}
+                    >
+                      Save
+                    </button>
+                    <span className="muted">
+                      {detailIsDirty()
+                        ? 'Unsaved edits — Save sends only changed fields'
+                        : 'No local edits'}
+                    </span>
+                  </div>
                   <div className="fields">
-                    {[
-                      ['primary_official_id', 'Primary official ID'],
-                      ['jurisdiction_code', 'Jurisdiction'],
-                      ['internal_status', 'Internal status'],
-                      ['owner', 'Assigned to'],
-                      ['next_action', 'Next action'],
-                      ['next_action_due', 'Next action due', 'date'],
-                      ['source_url', 'Source URL'],
-                    ].map(([key, label, type]) => (
-                      <div className="field" key={key}>
-                        <label htmlFor={key}>{label}</label>
-                        <input
-                          id={key}
-                          type={type || 'text'}
-                          value={detail[key] ?? ''}
-                          onChange={(e) => setDetail({ ...detail, [key]: e.target.value })}
-                        />
-                      </div>
-                    ))}
+                    <div className="field">
+                      <label htmlFor="primary_official_id">Primary official ID</label>
+                      <input
+                        id="primary_official_id"
+                        type="text"
+                        value={detail.primary_official_id ?? ''}
+                        onChange={(e) =>
+                          setDetail({ ...detail, primary_official_id: e.target.value })
+                        }
+                      />
+                    </div>
+                    <div className="field">
+                      <label htmlFor="jurisdiction_code">Jurisdiction</label>
+                      <select
+                        id="jurisdiction_code"
+                        value={detail.jurisdiction_code ?? ''}
+                        onChange={(e) =>
+                          setDetail({ ...detail, jurisdiction_code: e.target.value })
+                        }
+                      >
+                        <option value="">Select jurisdiction…</option>
+                        {JURISDICTION_OPTIONS.map((o) => (
+                          <option key={o.value} value={o.value}>
+                            {o.label}
+                          </option>
+                        ))}
+                        {detail.jurisdiction_code &&
+                        !JURISDICTION_OPTIONS.some((o) => o.value === detail.jurisdiction_code) ? (
+                          <option value={detail.jurisdiction_code}>
+                            {detail.jurisdiction_code}
+                          </option>
+                        ) : null}
+                      </select>
+                    </div>
+                    <div className="field">
+                      <label htmlFor="internal_status">Internal status</label>
+                      <select
+                        id="internal_status"
+                        value={detail.internal_status ?? ''}
+                        onChange={(e) =>
+                          setDetail({ ...detail, internal_status: e.target.value })
+                        }
+                      >
+                        <option value="">Select status…</option>
+                        {INTERNAL_STATUS_OPTIONS.map((o) => (
+                          <option key={o.value} value={o.value}>
+                            {o.label}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                    <div className="field">
+                      <label htmlFor="owner">Assigned to</label>
+                      <input
+                        id="owner"
+                        type="text"
+                        value={detail.owner ?? ''}
+                        onChange={(e) => setDetail({ ...detail, owner: e.target.value })}
+                      />
+                    </div>
+                    <div className="field">
+                      <label htmlFor="next_action">Next action</label>
+                      <input
+                        id="next_action"
+                        type="text"
+                        value={detail.next_action ?? ''}
+                        onChange={(e) => setDetail({ ...detail, next_action: e.target.value })}
+                      />
+                    </div>
+                    <div className="field">
+                      <label htmlFor="next_action_due">Next action due</label>
+                      <input
+                        id="next_action_due"
+                        type="date"
+                        value={detail.next_action_due ?? ''}
+                        onChange={(e) =>
+                          setDetail({ ...detail, next_action_due: e.target.value })
+                        }
+                      />
+                    </div>
+                    <div className="field">
+                      <label htmlFor="source_url">Source URL</label>
+                      <input
+                        id="source_url"
+                        type="text"
+                        value={detail.source_url ?? ''}
+                        onChange={(e) => setDetail({ ...detail, source_url: e.target.value })}
+                      />
+                    </div>
                     <label className="muted">
                       <input
                         type="checkbox"
@@ -1551,24 +1875,36 @@ export default function App() {
                   </div>
                   {readiness ? (
                     <>
-                      <h3>Lot readiness (configured rules)</h3>
+                      <h3>Workbook completeness vs official verification</h3>
                       <p className="muted">
-                        Operational assessment — missing evidence is never Ready. {readiness.assessment_note}
+                        These are separate signals. Neither means lending approval, clear-to-close,
+                        funding authorization, or inspection completion.
                       </p>
-                      <div>
+                      <div className="empty-actions" style={{ gap: 8, flexWrap: 'wrap' }}>
                         <span className={`pill ${readinessClass(readiness.state)}`}>
-                          {readiness.state_label || readinessLabel(readiness.state)}
+                          Workbook: {readiness.state_label || readinessLabel(readiness.state)}
                         </span>
-                        {readiness.target_start ? (
-                          <span className="muted">
-                            {' '}
-                            · Target start {readiness.target_start}
-                            {readiness.days_to_start != null
-                              ? ` (${readiness.days_to_start}d)`
-                              : ''}
-                          </span>
-                        ) : null}
+                        <span
+                          className={`pill ${
+                            detail.official_status ? 'live' : 'warn'
+                          }`}
+                        >
+                          Official AHJ:{' '}
+                          {detail.official_status ||
+                            (detail.primary_official_id ? 'Not verified yet' : 'No official ID')}
+                        </span>
                       </div>
+                      <p className="muted">
+                        Workbook rules — missing evidence is never Ready. {readiness.assessment_note}
+                      </p>
+                      {readiness.target_start ? (
+                        <div className="muted">
+                          Target start {readiness.target_start}
+                          {readiness.days_to_start != null
+                            ? ` (${readiness.days_to_start}d)`
+                            : ''}
+                        </div>
+                      ) : null}
                       <div className="muted">{readiness.summary}</div>
                       {readiness.outstanding?.length ? (
                         <>
@@ -1713,8 +2049,8 @@ export default function App() {
                   <h3>Find contact information</h3>
                   <p className="muted">
                     Roles are separate (owner ≠ applicant ≠ contractor). Provider return ≠ confirmed.
-                    Production Tracerfy stays off until owner configures secrets outside chat.
-                    {tracerfy ? ` Mode: ${tracerfy.mode}.` : ''}
+                    Paid production contact lookup stays off in this trial.
+                    {isOwner && tracerfy ? ` Mode: ${tracerfy.mode}.` : ''}
                   </p>
                   {selectedProperty() ? (
                     <div className="attention-item">
@@ -1737,15 +2073,10 @@ export default function App() {
                   ) : (
                     <p className="muted">Select a confirmed property to show the search address.</p>
                   )}
-                  {!tracerfy?.tokenPresent || !tracerfy?.productionGatesOk ? (
+                  {isOwner && (!tracerfy?.tokenPresent || !tracerfy?.productionGatesOk) ? (
                     <div className="banner warn">
-                      Connect Tracerfy to enable live lookups. Until then, use an invented demo
-                      property for labeled sandbox/fixture contacts, or enter manual contacts.
-                      {meta.tracerfySetupNote ? (
-                        <div className="muted" style={{ marginTop: '0.35rem' }}>
-                          {meta.tracerfySetupNote}
-                        </div>
-                      ) : null}
+                      Live paid contact lookup is not connected. Operators can still use an invented
+                      demo property for labeled sandbox contacts, or enter manual contacts.
                     </div>
                   ) : null}
                   {isOwner ? (
@@ -2039,7 +2370,8 @@ export default function App() {
           <p className="muted">
             Approaching starts, readiness blockers, needs-verification gaps, revision impact
             (review — not auto-invalidation), official changes, overdue actions, unresolved matching,
-            and no-progress (progress_anchor). Successful checks do not reset the progress clock.
+            and no-progress (progress_anchor). Acknowledge hides an item from this list; it does not
+            fix the underlying issue — use Open record or conflict controls for that.
           </p>
           {schedule ? (
             <div className="attention-item">
@@ -2061,10 +2393,44 @@ export default function App() {
             <div className="attention-item warn">
               <strong>Import conflicts pending: {conflicts.length}</strong>
               <ul className="history">
-                {conflicts.slice(0, 8).map((c) => (
+                {conflicts.map((c) => (
                   <li key={c.id}>
-                    {c.community_name} / {c.lot_label} · {c.field}: app={c.app_value} vs
-                    incoming={c.incoming_value}
+                    <div>
+                      {c.community_name} / {c.lot_label} · {c.field}
+                    </div>
+                    <div className="muted mono">
+                      app={c.app_value ?? '∅'} vs incoming={c.incoming_value ?? '∅'}
+                    </div>
+                    <div className="empty-actions" style={{ marginTop: 6 }}>
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={busy}
+                        onClick={() => resolveImportConflict(c, 'keep_app')}
+                      >
+                        Keep app
+                      </button>
+                      <button
+                        type="button"
+                        className="btn primary"
+                        disabled={busy}
+                        onClick={() => resolveImportConflict(c, 'take_incoming')}
+                      >
+                        Take incoming
+                      </button>
+                      {c.permit_record_id ? (
+                        <button
+                          type="button"
+                          className="btn"
+                          onClick={() => {
+                            setTab('permits');
+                            openDetail(c.permit_record_id);
+                          }}
+                        >
+                          Open record
+                        </button>
+                      ) : null}
+                    </div>
                   </li>
                 ))}
               </ul>
@@ -2077,20 +2443,38 @@ export default function App() {
               <div key={a.id} className={`attention-item ${a.kind}`}>
                 <div>
                   <strong>{a.kind}</strong> · {a.community_name} / {a.lot_label}
-                  {a.readiness_state ? ` · ${a.readiness_state}` : ''}
+                  {a.readiness_state ? ` · workbook ${a.readiness_state}` : ''}
                 </div>
                 <div>{a.message}</div>
+                <div className="muted">
+                  Owner: {a.owner || '—'} · Next: {a.next_action || '—'}
+                  {a.next_action_due ? ` · Due ${a.next_action_due}` : ''}
+                </div>
                 <div className="muted mono">{a.primary_official_id || '—'}</div>
-                <button
-                  type="button"
-                  className="btn"
-                  onClick={async () => {
-                    await api(`/api/attention/${a.id}/ack`, { method: 'POST' });
-                    setAttention((await api('/api/attention')).items);
-                  }}
-                >
-                  Acknowledge
-                </button>
+                <div className="empty-actions" style={{ marginTop: 6 }}>
+                  {a.permit_record_id ? (
+                    <button
+                      type="button"
+                      className="btn primary"
+                      onClick={() => {
+                        setTab('permits');
+                        openDetail(a.permit_record_id);
+                      }}
+                    >
+                      Open record
+                    </button>
+                  ) : null}
+                  <button
+                    type="button"
+                    className="btn"
+                    onClick={async () => {
+                      await api(`/api/attention/${a.id}/ack`, { method: 'POST' });
+                      setAttention((await api('/api/attention')).items);
+                    }}
+                  >
+                    Acknowledge (hide only)
+                  </button>
+                </div>
               </div>
             ))
           )}
@@ -2117,33 +2501,43 @@ export default function App() {
               </p>
             )}
             <label className="btn">
-              Preview upload
+              Choose workbook to preview
               <input
                 type="file"
-                accept=".xlsx"
+                accept=".xlsx,.xlsm"
                 hidden
-                onChange={(e) => e.target.files?.[0] && previewFile(e.target.files[0])}
+                onChange={(e) => {
+                  const f = e.target.files?.[0];
+                  e.target.value = '';
+                  if (f) previewFile(f);
+                }}
               />
             </label>
-            <label className="btn">
-              Commit upload
-              <input
-                type="file"
-                accept=".xlsx"
-                hidden
-                onChange={(e) => e.target.files?.[0] && commitFile(e.target.files[0])}
-              />
-            </label>
+            <button
+              type="button"
+              className="btn primary"
+              disabled={busy || !importPreview?.previewId}
+              onClick={commitPreviewedWorkbook}
+              title="Commits the exact file that was previewed (no re-selection)"
+            >
+              Commit previewed workbook
+            </button>
           </div>
           {importPreview ? (
             <>
               <div>
-                {importPreview.sectionCount} sections · {importPreview.rowCount} lot/permit rows ·{' '}
-                {importPreview.revisions} revisions · {importPreview.masterfile} masterfile ·{' '}
-                {importPreview.mstIds} MST IDs
-                {importPreview.archivedRowCount
-                  ? ` · ${importPreview.archivedRowCount} archived rows stored`
-                  : ''}
+                <strong>{importPreview.filename}</strong>
+                {importPreview.previewId ? (
+                  <span className="muted"> · preview ready to commit</span>
+                ) : null}
+                <div>
+                  {importPreview.sectionCount} sections · {importPreview.rowCount} lot/permit rows ·{' '}
+                  {importPreview.revisions} revisions · {importPreview.masterfile} masterfile ·{' '}
+                  {importPreview.mstIds} MST IDs
+                  {importPreview.archivedRowCount
+                    ? ` · ${importPreview.archivedRowCount} archived rows stored`
+                    : ''}
+                </div>
               </div>
               <div className="table-wrap">
                 <table>

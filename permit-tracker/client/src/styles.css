@@ -114,6 +114,16 @@ a {
   cursor: not-allowed;
 }
 
+.sticky-save {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: var(--panel);
+  padding: 8px 0;
+  margin-bottom: 4px;
+  border-bottom: 1px solid var(--line);
+}
+
 .banner {
   border: 1px solid #b7cfc4;
   background: #e8f4ee;

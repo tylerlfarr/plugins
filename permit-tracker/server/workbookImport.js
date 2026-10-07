@@ -119,8 +119,53 @@ function isDataRow(row) {
   return Boolean(lot || ht || extractOfficialIds(row[18]).length);
 }
 
+/**
+ * Reject malformed / unsupported / unrecognized-profile workbooks before preview or commit.
+ * Throws Error with .code = unsupported_format | unrecognized_profile | empty_workbook
+ */
+export function assertRecognizedWorkbook(parsed, filename = '') {
+  const name = String(filename || '').toLowerCase();
+  if (name && !/\.(xlsx|xlsm)$/i.test(name)) {
+    const err = new Error(
+      `Unsupported file type "${filename}". Upload a .xlsx workbook with the Permit Tracker sheet layout.`
+    );
+    err.code = 'unsupported_format';
+    throw err;
+  }
+  const sheets = parsed?.sheets || [];
+  if (!sheets.includes('Permit Tracker')) {
+    const err = new Error(
+      `Unrecognized workbook profile: missing "Permit Tracker" sheet (found: ${sheets.join(', ') || 'none'}).`
+    );
+    err.code = 'unrecognized_profile';
+    throw err;
+  }
+  const sections = parsed?.permitTracker?.sections || [];
+  if (!sections.length) {
+    const err = new Error(
+      'Unrecognized workbook profile: no Permit Tracker header sections found. Check that section header blocks match the expected layout.'
+    );
+    err.code = 'unrecognized_profile';
+    throw err;
+  }
+}
+
 export function parseWorkbookBuffer(buffer) {
-  const wb = XLSX.read(buffer, { type: 'buffer', cellDates: true, raw: false });
+  let wb;
+  try {
+    wb = XLSX.read(buffer, { type: 'buffer', cellDates: true, raw: false });
+  } catch (e) {
+    const err = new Error(
+      `Could not read workbook (${e.message || e}). Use a valid .xlsx file.`
+    );
+    err.code = 'unsupported_format';
+    throw err;
+  }
+  if (!wb?.SheetNames?.length) {
+    const err = new Error('Workbook has no sheets — unsupported or empty file.');
+    err.code = 'empty_workbook';
+    throw err;
+  }
   const result = {
     sheets: wb.SheetNames,
     permitTracker: { sections: [], rows: [] },
@@ -774,12 +819,13 @@ export function commitWorkbookParse(parsed, { changedBy, replaceSecondary = true
   return summary;
 }
 
-export function importWorkbookFile(filePathOrBuffer, filename = 'source.xlsx') {
+export function importWorkbookFile(filePathOrBuffer, filename = 'source.xlsx', opts = {}) {
   const buffer = Buffer.isBuffer(filePathOrBuffer)
     ? filePathOrBuffer
     : fs.readFileSync(filePathOrBuffer);
   const parsed = parseWorkbookBuffer(buffer);
-  const summary = commitWorkbookParse(parsed);
+  assertRecognizedWorkbook(parsed, filename);
+  const summary = commitWorkbookParse(parsed, { changedBy: opts.changedBy });
   return { parsed, summary, filename };
 }
 

@@ -75,6 +75,7 @@ export function exportCoexistenceXlsx({
   includeReviewedCandidates = false,
   filters = {},
   selectedIds = null,
+  selectedOnly = false,
 } = {}) {
   const statuses = includeReviewedCandidates
     ? [...new Set([...contactStatuses, 'candidate'])]
@@ -90,8 +91,11 @@ export function exportCoexistenceXlsx({
             .map((s) => Number(s.trim()))
             .filter((n) => Number.isFinite(n));
 
+  // Selected-row export ignores table filters so hidden selections still export.
+  const useSelectedOnly = Boolean(selectedOnly) || (selected && selected.length > 0);
   const { sql: filterSql, params } = buildPermitFilterClause(filters, {
     selectedIds: selected,
+    selectedOnly: useSelectedOnly,
   });
   // buildPermitFilterClause already includes record_origin = import unless include_demo
   const where = `1=1${filterSql}`;

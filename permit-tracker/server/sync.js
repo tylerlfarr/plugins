@@ -4,6 +4,7 @@ import {
   recordChange,
   upsertAttention,
   resolveAttentionByCondition,
+  resolveSourceAttentionForPermit,
   isDemoMode,
 } from './db.js';
 import { checkPermit } from './connectors/index.js';
@@ -177,8 +178,9 @@ export function applyConnectorResult(permit, result, changedBy = 'connector', qu
     return { outcome: result.outcome, mode: result.mode || 'none' };
   }
 
-  // Success path — clear source-error conditions for this ID
+  // Success path — clear all source-error Attention for this permit (any prior ID)
   resolveAttentionByCondition(`source:${permit.id}:${officialId}`);
+  resolveSourceAttentionForPermit(permit.id);
 
   let changed = false;
   const sets = [

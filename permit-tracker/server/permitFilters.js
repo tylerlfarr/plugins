@@ -36,12 +36,17 @@ export function normalizePermitFilters(raw = {}) {
  * and LEFT JOIN readiness_assessments ra.
  *
  * @param {object} filters normalized filters
- * @param {{ selectedIds?: number[] }} opts
- *   - selectedIds: when provided (selected-row export), restrict to those IDs
- *     (still requires import origin unless include_demo). Filters still apply.
+ * @param {{ selectedIds?: number[], selectedOnly?: boolean }} opts
+ *   - selectedIds: restrict to those IDs (import origin unless include_demo)
+ *   - selectedOnly: when true with selectedIds, ignore q/status/etc. filters
+ *     so Export selected is independent of the current table filter
  */
 export function buildPermitFilterClause(filters = {}, opts = {}) {
-  const f = normalizePermitFilters(filters);
+  const selectedIds = Array.isArray(opts.selectedIds)
+    ? opts.selectedIds.map(Number).filter((n) => Number.isFinite(n) && n > 0)
+    : null;
+  const selectedOnly = Boolean(opts.selectedOnly) && selectedIds && selectedIds.length > 0;
+  const f = selectedOnly ? normalizePermitFilters({ include_demo: filters.include_demo }) : normalizePermitFilters(filters);
   let sql = '';
   const params = [];
 
@@ -49,9 +54,6 @@ export function buildPermitFilterClause(filters = {}, opts = {}) {
     sql += ` AND p.record_origin = 'import'`;
   }
 
-  const selectedIds = Array.isArray(opts.selectedIds)
-    ? opts.selectedIds.map(Number).filter((n) => Number.isFinite(n) && n > 0)
-    : null;
   if (selectedIds && selectedIds.length) {
     sql += ` AND p.id IN (${selectedIds.map(() => '?').join(',')})`;
     params.push(...selectedIds);
