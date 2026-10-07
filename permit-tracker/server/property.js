@@ -129,6 +129,16 @@ export function upsertProperty(fields, { actor = 'ui' } = {}) {
     const prev = getProperty(id);
     if (!prev) throw new Error('Property not found');
     const changed = materialIdentityChanged(prev, normalized);
+    // Preserve official provenance; operator edits append correction notes rather than demoting source.
+    const keepOfficial = prev.source === 'official_connector';
+    const nextSource = keepOfficial ? 'official_connector' : source || prev.source;
+    let nextNotes = notes;
+    if (keepOfficial) {
+      const base = prev.notes || '';
+      nextNotes = base.includes('operator_correction')
+        ? notes || base
+        : `${base}${base ? ' | ' : ''}operator_correction applied`.trim();
+    }
     db.prepare(
       `UPDATE properties SET site_address=?, city=?, state=?, zip=?, parcel_apn=?,
        parcel_jurisdiction=?, source=?, match_state=?, notes=?, identity_key=?, updated_at=datetime('now')
@@ -140,9 +150,9 @@ export function upsertProperty(fields, { actor = 'ui' } = {}) {
       normalized.zip,
       normalized.parcel_apn,
       normalized.parcel_jurisdiction,
-      source || prev.source,
+      nextSource,
       match_state || prev.match_state,
-      notes,
+      nextNotes,
       identity_key,
       id
     );
@@ -491,19 +501,24 @@ export function offerOfficialSiteAddressCandidate(permitId, { actor = 'ui' } = {
     payload = {};
   }
   const fields = payload.fields || {};
+  const raw = payload.raw || {};
   const address =
     fields.address ||
     payload.siteAddress ||
     payload.site_address ||
     payload.address ||
     fields.ADDRESS_1 ||
-    payload.raw?.ADDRESS_1 ||
+    raw.ADDRESS_1 ||
     null;
+  const city = fields.city || payload.city || raw.CITY || '';
+  const state = fields.state || payload.state || raw.STATE || '';
+  const zip = fields.zip || payload.zip || raw.ZIP_CODE || '';
   const parcel =
     fields.parcel ||
     payload.parcel ||
     payload.parcel_apn ||
-    payload.raw?.APN ||
+    raw.PARCEL_ID ||
+    raw.APN ||
     null;
   if (!address && !parcel) {
     return { offered: false, reason: 'no_site_address_in_official_response' };
@@ -512,15 +527,16 @@ export function offerOfficialSiteAddressCandidate(permitId, { actor = 'ui' } = {
   const property = upsertProperty(
     {
       site_address: address || '',
-      city: payload.city || '',
-      state: payload.state || '',
-      zip: payload.zip || '',
+      city: city || '',
+      state: state || '',
+      zip: zip || '',
       parcel_apn: parcel || '',
       parcel_jurisdiction: permit?.jurisdiction_code || '',
       source: 'official_connector',
       match_state: 'candidate',
       record_origin: 'official_offer',
-      notes: 'Source-attributed official site address — review before confirm. Site ≠ owner mailing.',
+      notes:
+        'Source-attributed official site address — review before confirm. Site ≠ owner mailing. Missing city/state/ZIP/parcel stay blank (unknown), not invented.',
     },
     { actor }
   );

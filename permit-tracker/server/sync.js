@@ -14,6 +14,63 @@ import {
   READINESS_STATES,
 } from './readiness.js';
 import { applyOfficialUseToPermit } from './useClassification.js';
+import { listSources } from './sources/registry.js';
+
+/** Explicit test bypass only — never enable on Hostinger / production. */
+export function sourceEligibilityBypassed() {
+  return process.env.PERMIT_BYPASS_SOURCE_ELIGIBILITY === '1';
+}
+
+/**
+ * Operational live checks require an activated verified/degraded source for the
+ * permit's jurisdiction AND confirmed jurisdiction mapping.
+ * Demo/fixture records skip this gate (still cannot invent live statuses).
+ */
+export function evaluateCheckEligibility(permit) {
+  if (sourceEligibilityBypassed()) {
+    return { ok: true, bypass: true };
+  }
+  const origin = permit.record_origin || 'import';
+  if (origin === 'demo' || origin === 'fixture') {
+    return { ok: true, demo: true };
+  }
+  if (!permit.jurisdiction_confirmed) {
+    return {
+      ok: false,
+      outcome: 'blocked',
+      error:
+        'Jurisdiction not confirmed. Confirm AHJ mapping before operational live checks.',
+    };
+  }
+  const code = permit.jurisdiction_code;
+  if (!code || code === 'unresolved' || code === 'unknown') {
+    return {
+      ok: false,
+      outcome: 'blocked',
+      error: 'Jurisdiction unresolved — confirm AHJ before live checks.',
+    };
+  }
+  const sources = listSources({ jurisdiction_code: code });
+  const activated = sources.filter(
+    (s) => s.activated && (s.state === 'verified' || s.state === 'degraded') && s.adapter_type && s.adapter_type !== 'none'
+  );
+  if (!activated.length) {
+    const verified = sources.filter((s) => s.state === 'verified' || s.state === 'degraded');
+    if (verified.length) {
+      return {
+        ok: false,
+        outcome: 'blocked',
+        error: `Verified source for ${code} is not activated. Review Sources and activate after confirming coverage limits.`,
+      };
+    }
+    return {
+      ok: false,
+      outcome: 'unsupported',
+      error: `No verified operational source registered for ${code}.`,
+    };
+  }
+  return { ok: true, sources: activated.map((s) => s.key) };
+}
 
 const OFFICIAL_DATE_FIELDS = [
   ['submittedDate', 'submitted_date'],
@@ -268,7 +325,10 @@ export function updateReadiness(permitId) {
   return updateLotReadiness(permitId);
 }
 
-export async function syncPermitById(id, { forceFail = false, officialId, allowSynthetic } = {}) {
+export async function syncPermitById(
+  id,
+  { forceFail = false, officialId, allowSynthetic, actor, enforceEligibility } = {}
+) {
   const permit = db.prepare('SELECT * FROM permit_records WHERE id = ?').get(id);
   if (!permit) throw new Error('Permit not found');
   const oid = officialId || permit.primary_official_id;
@@ -280,6 +340,25 @@ export async function syncPermitById(id, { forceFail = false, officialId, allowS
     return { outcome: 'failed', error: 'No official ID' };
   }
 
+  const gate =
+    enforceEligibility === false || sourceEligibilityBypassed()
+      ? { ok: true, bypass: true }
+      : evaluateCheckEligibility(permit);
+  if (!gate.ok) {
+    const now = new Date().toISOString();
+    db.prepare(
+      `UPDATE permit_records SET last_checked_at = ?, last_check_outcome = ?, last_check_error = ?,
+       updated_at = datetime('now') WHERE id = ?`
+    ).run(now, gate.outcome, gate.error, id);
+    return {
+      outcome: gate.outcome,
+      mode: 'none',
+      error: gate.error,
+      blocked: gate.outcome === 'blocked',
+      checkedAt: now,
+    };
+  }
+
   const demo = isDemoMode() || permit.record_origin === 'demo' || permit.record_origin === 'fixture';
   const result = await checkPermit({
     jurisdictionCode: permit.jurisdiction_code,
@@ -288,7 +367,11 @@ export async function syncPermitById(id, { forceFail = false, officialId, allowS
     allowSynthetic: allowSynthetic ?? demo,
     recordOrigin: permit.record_origin,
   });
-  return applyConnectorResult(permit, result, getSetting('current_user', 'demo.user'), oid);
+  const changedBy =
+    actor ||
+    getSetting('current_user', null) ||
+    'system_job';
+  return applyConnectorResult(permit, result, changedBy, oid);
 }
 
 export async function syncAllLinked({ fairfaxOnly = false, trigger = 'manual' } = {}) {
@@ -330,13 +413,19 @@ export async function syncAllLinked({ fairfaxOnly = false, trigger = 'manual' } 
     not_found: 0,
     unavailable: 0,
     failed: 0,
+    blocked: 0,
+    unsupported: 0,
     skipped_demo: 0,
   };
   const results = [];
   for (const row of rows) {
     counts.total += 1;
     // eslint-disable-next-line no-await-in-loop
-    const r = await syncPermitById(row.id, { officialId: row.official_id, allowSynthetic: false });
+    const r = await syncPermitById(row.id, {
+      officialId: row.official_id,
+      allowSynthetic: false,
+      actor: getSetting('current_user', null) || 'system_job',
+    });
     results.push({ id: row.id, official_id: row.official_id, ...r });
     if (counts[r.outcome] != null) counts[r.outcome] += 1;
     else counts.failed += 1;
@@ -353,12 +442,25 @@ export async function syncAllLinked({ fairfaxOnly = false, trigger = 'manual' } 
     counts.unavailable,
     counts.failed,
     counts.skipped_demo,
-    JSON.stringify({ fairfaxOnly }),
+    JSON.stringify({
+      fairfaxOnly,
+      blocked: counts.blocked,
+      unsupported: counts.unsupported,
+    }),
     runId
   );
 
   rebuildAttention();
-  return { results, runId, counts };
+  let diagnostic = null;
+  if (fairfaxOnly && counts.total === 0) {
+    const imported = db.prepare(`SELECT COUNT(*) AS c FROM permit_records WHERE record_origin = 'import'`).get()
+      .c;
+    diagnostic =
+      imported === 0
+        ? 'No imported permits yet. Import a workbook first. Run Fairfax checks only re-checks saved Fairfax County IDs — it does not search the county GIS for new permits.'
+        : 'No imported Fairfax County permits with official IDs matched this run. Table search/filters only narrow saved workbook rows; they do not discover new Fairfax permits.';
+  }
+  return { results, runId, counts, diagnostic };
 }
 
 export function rebuildAttention() {

@@ -124,6 +124,41 @@ a {
   font-size: 0.95rem;
 }
 
+.empty-state {
+  margin: 0 0 14px;
+  padding: 18px 18px 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: var(--shadow);
+  max-width: 42rem;
+}
+
+.empty-state.compact {
+  margin: 8px 0;
+  padding: 12px 14px;
+  max-width: none;
+  box-shadow: none;
+}
+
+.empty-state h2 {
+  margin: 0 0 8px;
+  font-family: var(--serif);
+  font-size: 1.25rem;
+}
+
+.empty-state p {
+  margin: 0 0 10px;
+  line-height: 1.45;
+}
+
+.empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 4px;
+}
+
 .banner.warn {
   background: #fff7ed;
   border-color: #fdba74;

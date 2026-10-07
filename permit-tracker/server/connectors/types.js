@@ -44,12 +44,6 @@ export const JURISDICTIONS = {
     mode: 'unsupported',
     notes: 'Needs confirmed mapping; ID heuristics alone are insufficient.',
   },
-  unknown: {
-    code: 'unresolved',
-    label: 'Unresolved jurisdiction',
-    mode: 'unsupported',
-    notes: 'Legacy alias for unresolved.',
-  },
   other: {
     code: 'other',
     label: 'Other',
@@ -57,6 +51,9 @@ export const JURISDICTIONS = {
     notes: 'Out-of-scope jurisdictions.',
   },
 };
+
+/** Legacy alias — kept for lookups only; not listed as a separate UI option. */
+JURISDICTIONS.unknown = JURISDICTIONS.unresolved;
 
 export const FAIRFAX_FIELD_AVAILABILITY = {
   RECORDID: 'live',
@@ -69,6 +66,10 @@ export const FAIRFAX_FIELD_AVAILABILITY = {
   ISSUED_DATE: 'live',
   CLOSED_DATE: 'live',
   ADDRESS_1: 'live',
+  CITY: 'live',
+  STATE: 'live',
+  ZIP_CODE: 'live',
+  PARCEL_ID: 'live',
   LINK_URL: 'live',
   DOCUMENT_URL: 'live',
   pending_state: 'unavailable',

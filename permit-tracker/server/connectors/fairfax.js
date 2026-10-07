@@ -23,7 +23,7 @@ export async function checkFairfaxPermit({ officialId }) {
       const params = new URLSearchParams({
         where: `RECORDID='${escaped}'`,
         outFields:
-          'RECORDID,APPTYPEALIAS,RECORD_STATUS,RECORD_STATUS_DATE,SUBMITTED_DATE,ACCEPTED_DATE,APPROVED_DATE,ISSUED_DATE,CLOSED_DATE,ADDRESS_1,LINK_URL,DOCUMENT_URL',
+          'RECORDID,APPTYPEALIAS,RECORD_STATUS,RECORD_STATUS_DATE,SUBMITTED_DATE,ACCEPTED_DATE,APPROVED_DATE,ISSUED_DATE,CLOSED_DATE,ADDRESS_1,CITY,STATE,ZIP_CODE,PARCEL_ID,LINK_URL,DOCUMENT_URL',
         returnGeometry: 'false',
         f: 'json',
       });
@@ -71,6 +71,10 @@ export async function checkFairfaxPermit({ officialId }) {
             closedDate: epochMsToDate(a.CLOSED_DATE),
             sourceUrl: a.LINK_URL || undefined,
             address: a.ADDRESS_1 || undefined,
+            city: a.CITY || undefined,
+            state: a.STATE || undefined,
+            zip: a.ZIP_CODE || undefined,
+            parcel: a.PARCEL_ID || undefined,
           },
           fieldAvailability: FAIRFAX_FIELD_AVAILABILITY,
           checkedAt,

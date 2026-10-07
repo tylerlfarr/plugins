@@ -334,9 +334,13 @@ app.get('/api/meta', requireAuth, (req, res) => {
     productPromise:
       'Automatically run specific permit checks for communities/lots, preserve internal spreadsheet workflow, show what changed before morning meeting.',
     importProfile: 'source workbook (employer-specific mapping separate from reusable core)',
+    storeWorkbookAvailable: Boolean(SOURCE_WORKBOOK && fs.existsSync(SOURCE_WORKBOOK)),
+    storeWorkbookConfigured: Boolean(SOURCE_WORKBOOK),
     trialSequence:
       'Import workbook → fill missing property info → confirm property → retrieve supported official info → optionally find contacts → review → export → inspect Attention',
     businessName: getSetting('business_name', ''),
+    simulateFailureEnabled: process.env.PERMIT_ALLOW_SIMULATE_FAILURE === '1',
+    sourceEligibilityEnforced: process.env.PERMIT_BYPASS_SOURCE_ELIGIBILITY !== '1',
     tracerfy: tracerfyConfig(),
     tracerfySetupNote:
       'Connect Tracerfy to enable live lookups: set TRACERFY_API_TOKEN, tracerfy_spend_limit_credits, tracerfy_commercial_confirmed=1, and tracerfy_production_enabled=1 in the host environment/secrets (see docs/deploy.md). Never paste tokens in chat.',
@@ -606,7 +610,44 @@ app.patch('/api/permits/:id', (req, res) => {
       error: 'official_status and source_native_status are read-only (official connector fields)',
     });
   }
+  const expectedVersion =
+    req.body?.expected_row_version ?? req.body?.expected_updated_at /* legacy alias ignored for equality */;
+  if (
+    req.body?.expected_row_version != null &&
+    Number(req.body.expected_row_version) !== Number(permit.row_version ?? 1)
+  ) {
+    const fresh = db.prepare(`${PERMIT_SQL} WHERE p.id = ?`).get(permit.id);
+    return res.status(409).json({
+      error: 'stale_write',
+      message:
+        'This permit changed since you opened it (e.g. a bulk update). Reload the detail and re-apply your edits.',
+      permit: fresh,
+      server_row_version: permit.row_version,
+      client_expected_row_version: req.body.expected_row_version,
+      server_updated_at: permit.updated_at,
+    });
+  }
+  // Also accept expected_updated_at when row_version not sent (older clients): still detect
+  // bulk collisions when timestamps differ; same-second collisions require row_version.
+  if (
+    req.body?.expected_row_version == null &&
+    req.body?.expected_updated_at != null &&
+    String(req.body.expected_updated_at) !== '' &&
+    String(permit.updated_at) !== String(req.body.expected_updated_at)
+  ) {
+    const fresh = db.prepare(`${PERMIT_SQL} WHERE p.id = ?`).get(permit.id);
+    return res.status(409).json({
+      error: 'stale_write',
+      message:
+        'This permit changed since you opened it (e.g. a bulk update). Reload the detail and re-apply your edits.',
+      permit: fresh,
+      server_updated_at: permit.updated_at,
+      client_expected_updated_at: req.body.expected_updated_at,
+    });
+  }
+  void expectedVersion;
   const user = currentUser();
+  let mutated = false;
   for (const key of editable) {
     if (!(key in (req.body || {}))) continue;
     let value = req.body[key];
@@ -617,6 +658,25 @@ app.patch('/api/permits/:id', (req, res) => {
       value,
       permit.id
     );
+    mutated = true;
+  }
+  // Operator confirmation of AHJ (required before operational live checks).
+  if ('jurisdiction_confirmed' in (req.body || {})) {
+    const next = req.body.jurisdiction_confirmed ? 1 : 0;
+    if (Number(permit.jurisdiction_confirmed) !== next) {
+      recordChange(permit.id, 'jurisdiction_confirmed', permit.jurisdiction_confirmed, next, user, 'ui');
+      db.prepare(
+        `UPDATE permit_records SET jurisdiction_confirmed = ?, jurisdiction_source = CASE
+           WHEN ? = 1 THEN 'operator_confirmed' ELSE jurisdiction_source END,
+         updated_at = datetime('now') WHERE id = ?`
+      ).run(next, next, permit.id);
+      mutated = true;
+    }
+  }
+  if (mutated) {
+    db.prepare(
+      `UPDATE permit_records SET row_version = COALESCE(row_version, 1) + 1, updated_at = datetime('now') WHERE id = ?`
+    ).run(permit.id);
   }
   if (Array.isArray(req.body?.milestones)) {
     for (const m of req.body.milestones) {
@@ -667,25 +727,34 @@ app.post('/api/permits/bulk', (req, res) => {
   if (!Array.isArray(ids) || !patch) return res.status(400).json({ error: 'ids and patch required' });
   const user = currentUser();
   const allowed = ['internal_status', 'owner', 'next_action', 'next_action_due'];
+  let changed = 0;
+  const updatedIds = [];
   const tx = db.transaction(() => {
     for (const id of ids) {
       const permit = db.prepare('SELECT * FROM permit_records WHERE id = ?').get(Number(id));
       if (!permit) continue;
+      let touched = false;
       for (const key of allowed) {
         if (!(key in patch)) continue;
         const value = patch[key] === '' ? null : patch[key];
         if (String(permit[key] ?? '') === String(value ?? '')) continue;
         recordChange(permit.id, key, permit[key], value, user, 'bulk');
-        db.prepare(`UPDATE permit_records SET ${key} = ?, updated_at = datetime('now') WHERE id = ?`).run(
-          value,
-          permit.id
-        );
+        db.prepare(
+          `UPDATE permit_records SET ${key} = ?, row_version = COALESCE(row_version, 1) + 1,
+           updated_at = datetime('now') WHERE id = ?`
+        ).run(value, permit.id);
+        touched = true;
+      }
+      if (touched) {
+        changed += 1;
+        updatedIds.push(permit.id);
       }
     }
   });
   tx();
   rebuildAttention();
-  res.json({ ok: true, count: ids.length });
+  const permits = updatedIds.map((id) => db.prepare(`${PERMIT_SQL} WHERE p.id = ?`).get(id));
+  res.json({ ok: true, count: ids.length, changed, permits });
 });
 
 app.get('/api/filters', (_req, res) => {
@@ -897,6 +966,8 @@ app.post('/api/sync/:id', requireAuth, async (req, res) => {
     const result = await syncPermitById(Number(req.params.id), {
       officialId: req.body?.officialId,
       allowSynthetic: false,
+      actor: currentUser() || 'system_job',
+      enforceEligibility: true,
     });
     rebuildAttention();
     const permit = db.prepare(`${PERMIT_SQL} WHERE p.id = ?`).get(Number(req.params.id));
@@ -907,6 +978,8 @@ app.post('/api/sync/:id', requireAuth, async (req, res) => {
 });
 
 app.post('/api/sync', async (req, res) => {
+  // Attribute bulk/Fairfax sync runs to the authenticated actor when present.
+  if (currentUser()) setSetting('current_user', currentUser());
   const results = await syncAllLinked({
     fairfaxOnly: Boolean(req.body?.fairfaxOnly),
     trigger: req.body?.trigger || 'manual',
@@ -949,34 +1022,77 @@ function workbookPreviewResponse(parsed, filename) {
   };
 }
 
-app.post('/api/import/workbook/preview', upload.single('file'), (req, res) => {
-  if (!req.file) return res.status(400).json({ error: 'file required' });
-  const parsed = parseWorkbookBuffer(req.file.buffer);
-  res.json(workbookPreviewResponse(parsed, req.file.originalname));
+app.post('/api/import/workbook/preview', (req, res) => {
+  upload.single('file')(req, res, (err) => {
+    if (err) {
+      const tooLarge = err.code === 'LIMIT_FILE_SIZE';
+      return res.status(tooLarge ? 413 : 400).json({
+        error: tooLarge
+          ? 'Workbook exceeds the 20 MB upload limit. Split the file or contact the owner.'
+          : err.message || 'Upload failed',
+      });
+    }
+    if (!req.file) return res.status(400).json({ error: 'file required — upload a .xlsx workbook' });
+    try {
+      const parsed = parseWorkbookBuffer(req.file.buffer);
+      res.json(workbookPreviewResponse(parsed, req.file.originalname));
+    } catch (e) {
+      res.status(400).json({
+        error: `Could not parse workbook: ${e.message || e}. Use a valid .xlsx with the Permit Tracker sheet layout.`,
+      });
+    }
+  });
 });
 
-app.post('/api/import/workbook/commit', upload.single('file'), (req, res) => {
-  let buffer = req.file?.buffer;
-  if (!buffer && req.body?.useStoreWorkbook) {
-    if (!fs.existsSync(SOURCE_WORKBOOK)) {
-      return res.status(404).json({ error: 'Source workbook not found in store' });
+app.post('/api/import/workbook/commit', (req, res) => {
+  upload.single('file')(req, res, (err) => {
+    if (err) {
+      const tooLarge = err.code === 'LIMIT_FILE_SIZE';
+      return res.status(tooLarge ? 413 : 400).json({
+        error: tooLarge
+          ? 'Workbook exceeds the 20 MB upload limit.'
+          : err.message || 'Upload failed',
+      });
     }
-    buffer = fs.readFileSync(SOURCE_WORKBOOK);
-  }
-  if (!buffer) return res.status(400).json({ error: 'file or useStoreWorkbook required' });
-  const parsed = parseWorkbookBuffer(buffer);
-  const summary = commitWorkbookParse(parsed, { changedBy: currentUser() });
-  rebuildAttention();
-  res.json({ summary, sectionCount: parsed.permitTracker.sections.length });
+    try {
+      let buffer = req.file?.buffer;
+      if (!buffer && req.body?.useStoreWorkbook) {
+        if (!SOURCE_WORKBOOK || !fs.existsSync(SOURCE_WORKBOOK)) {
+          return res.status(404).json({
+            error:
+              'Stored source workbook is not available on this host. Upload a .xlsx file instead.',
+          });
+        }
+        buffer = fs.readFileSync(SOURCE_WORKBOOK);
+      }
+      if (!buffer) return res.status(400).json({ error: 'file or useStoreWorkbook required' });
+      const parsed = parseWorkbookBuffer(buffer);
+      const summary = commitWorkbookParse(parsed, { changedBy: currentUser() });
+      rebuildAttention();
+      res.json({ summary, sectionCount: parsed.permitTracker.sections.length });
+    } catch (e) {
+      res.status(400).json({
+        error: `Could not import workbook: ${e.message || e}`,
+      });
+    }
+  });
 });
 
 app.post('/api/import/workbook/store', (_req, res) => {
-  if (!fs.existsSync(SOURCE_WORKBOOK)) {
-    return res.status(404).json({ error: 'Source workbook not found' });
+  if (!SOURCE_WORKBOOK || !fs.existsSync(SOURCE_WORKBOOK)) {
+    return res.status(404).json({
+      error:
+        'Stored source workbook is not available on this host. Use Import → choose file to upload a workbook.',
+      storeWorkbookAvailable: false,
+    });
   }
-  const { summary } = importWorkbookFile(SOURCE_WORKBOOK);
-  rebuildAttention();
-  res.json({ summary, path: SOURCE_WORKBOOK });
+  try {
+    const { summary } = importWorkbookFile(SOURCE_WORKBOOK);
+    rebuildAttention();
+    res.json({ summary, path: SOURCE_WORKBOOK });
+  } catch (e) {
+    res.status(400).json({ error: `Could not import stored workbook: ${e.message || e}` });
+  }
 });
 
 // Legacy aliases — same handlers

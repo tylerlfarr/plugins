@@ -564,6 +564,7 @@ export function migrate() {
   addColumn('permit_records', 'use_classification_manual', 'use_classification_manual TEXT');
   addColumn('permit_records', 'use_classification_manual_by', 'use_classification_manual_by TEXT');
   addColumn('permit_records', 'use_classification_manual_at', 'use_classification_manual_at TEXT');
+  addColumn('permit_records', 'row_version', 'row_version INTEGER NOT NULL DEFAULT 1');
 
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_lot_stable ON lot_groups(stable_key) WHERE stable_key != ''`);
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_property_identity ON properties(identity_key) WHERE identity_key != ''`);

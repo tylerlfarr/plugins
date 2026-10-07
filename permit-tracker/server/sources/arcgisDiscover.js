@@ -169,8 +169,9 @@ export async function inspectArcGisUrl(rawUrl, { sampleKnownIds = [] } = {}) {
     }
   }
 
-  // Issued-only / relevance hints
+  // Issued-only / relevance hints + known Fairfax PLUS coverage honesty
   const fieldBlob = JSON.stringify(layerMeta?.fields || []).toLowerCase();
+  const endpointLower = String(serviceUrl || url).toLowerCase();
   const limitations = [];
   if (sampleError) limitations.push(`Query sample failed: ${sampleError}`);
   if (fieldBlob.includes('bp_issue') && !fieldBlob.includes('status')) {
@@ -181,6 +182,11 @@ export async function inspectArcGisUrl(rawUrl, { sampleKnownIds = [] } = {}) {
   }
   if (knownIdTests.length && knownIdTests.every((t) => t.outcome !== 'matched')) {
     limitations.push('Known workbook IDs did not match sample queries');
+  }
+  if (endpointLower.includes('building_records_plus')) {
+    limitations.push(
+      'Fairfax Building Records PLUS: issued-heavy layer; pending / reviewer comments / holds / inspections unavailable. City of Fairfax is a separate AHJ.'
+    );
   }
 
   return {

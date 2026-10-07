@@ -14,7 +14,7 @@ npm test
 
 Single port: `npm run build && npm start`
 
-Docs: [`docs/setup.md`](docs/setup.md) · [`docs/hostinger.md`](docs/hostinger.md) · [`docs/hostinger-persistence-checklist.md`](docs/hostinger-persistence-checklist.md) · [`docs/operator-trial-script.md`](docs/operator-trial-script.md) · [`docs/hands-on-private-trial.md`](docs/hands-on-private-trial.md) · [`docs/deploy.md`](docs/deploy.md) · [`docs/pwc-loudoun-source-evidence.md`](docs/pwc-loudoun-source-evidence.md) · [`docs/coverage-matrix.md`](docs/coverage-matrix.md) · [`docs/workbook-workflow-map.md`](docs/workbook-workflow-map.md)
+Docs: [`docs/setup.md`](docs/setup.md) · [`docs/hostinger.md`](docs/hostinger.md) · [`docs/hostinger-persistence-checklist.md`](docs/hostinger-persistence-checklist.md) · [`docs/operator-trial-script.md`](docs/operator-trial-script.md) · [`docs/hands-on-private-trial.md`](docs/hands-on-private-trial.md) · [`docs/fairfax-discovery-assessment.md`](docs/fairfax-discovery-assessment.md) · [`docs/deploy.md`](docs/deploy.md) · [`docs/pwc-loudoun-source-evidence.md`](docs/pwc-loudoun-source-evidence.md) · [`docs/coverage-matrix.md`](docs/coverage-matrix.md) · [`docs/workbook-workflow-map.md`](docs/workbook-workflow-map.md)
 
 ## Source workbook
 

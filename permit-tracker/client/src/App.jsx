@@ -6,9 +6,22 @@ async function api(path, options = {}) {
     ...(options.headers || {}),
   };
   const res = await fetch(path, { credentials: 'same-origin', ...options, headers });
-  if (!res.ok) throw new Error((await res.text()) || res.statusText);
   const ct = res.headers.get('content-type') || '';
-  if (ct.includes('application/json')) return res.json();
+  const isJson = ct.includes('application/json');
+  if (!res.ok) {
+    const text = await res.text();
+    let body = null;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+      body = null;
+    }
+    const err = new Error(body?.message || body?.error || text || res.statusText);
+    err.status = res.status;
+    err.body = body;
+    throw err;
+  }
+  if (isJson) return res.json();
   return res;
 }
 
@@ -128,6 +141,8 @@ export default function App() {
 
   async function openDetail(id) {
     const requestId = ++detailRequestSeq.current;
+    // Preserve prior selection across reload (demo/contact actions must not wipe it).
+    const keepId = selectedPropertyId;
     // Clear record-specific form state immediately to avoid carryover while loading
     setPropertyForm({ ...emptyPropertyForm });
     setSelectedPropertyId(null);
@@ -154,12 +169,16 @@ export default function App() {
     setContacts(data.contacts || []);
     setContactJobs(data.contactJobs || []);
     setTracerfy(data.tracerfy || null);
-    const confirmed = (data.properties || []).filter((p) => p.link_state === 'confirmed');
-    // Default to confirmed only when unambiguous
-    if (confirmed.length === 1) {
+    const props = data.properties || [];
+    const confirmed = props.filter((p) => p.link_state === 'confirmed');
+    const kept = keepId ? props.find((p) => p.id === keepId) : null;
+    // Prefer prior selection (survives demo/contact actions), else unambiguous defaults.
+    if (kept) {
+      applyPropertyToForm(kept);
+    } else if (confirmed.length === 1) {
       applyPropertyToForm(confirmed[0]);
-    } else if ((data.properties || []).length === 1 && confirmed.length === 0) {
-      applyPropertyToForm(data.properties[0]);
+    } else if (props.length === 1 && confirmed.length === 0) {
+      applyPropertyToForm(props[0]);
     } else {
       applyPropertyToForm(null);
     }
@@ -627,7 +646,7 @@ export default function App() {
         source_native_status: _sns,
         ...rest
       } = detail;
-      await api(`/api/permits/${detail.id}`, {
+      const data = await api(`/api/permits/${detail.id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -639,13 +658,32 @@ export default function App() {
           next_action_due: rest.next_action_due,
           source_url: rest.source_url,
           permit_kind: rest.permit_kind,
+          jurisdiction_confirmed: Boolean(rest.jurisdiction_confirmed),
+          expected_row_version: detail.row_version ?? 1,
+          expected_updated_at: detail.updated_at,
         }),
       });
       setMessage('Saved.');
+      if (data.permit) setDetail(data.permit);
       await refreshLists();
       await openDetail(detail.id);
     } catch (e) {
-      setMessage(String(e.message || e));
+      if (e.status === 409 || e.body?.error === 'stale_write') {
+        const fresh = e.body?.permit;
+        setMessage(
+          e.body?.message ||
+            'Stale save blocked — this row changed (e.g. bulk update). Reloaded current values; re-apply your edits if still needed.'
+        );
+        if (fresh) {
+          setDetail(fresh);
+          await refreshLists();
+        } else {
+          await openDetail(detail.id);
+          await refreshLists();
+        }
+      } else {
+        setMessage(String(e.message || e));
+      }
     } finally {
       setBusy(false);
     }
@@ -675,10 +713,20 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ fairfaxOnly: true }),
       });
-      setMessage(
-        `Fairfax sync finished: ${data.counts?.total ?? data.results?.length ?? 0} checks` +
-          (data.counts ? ` (updated ${data.counts.updated}, no_change ${data.counts.no_change})` : '')
-      );
+      const total = data.counts?.total ?? data.results?.length ?? 0;
+      if (total === 0) {
+        setMessage(
+          data.diagnostic ||
+            'Fairfax sync finished: 0 checks. Import a workbook with Fairfax County official IDs first — this button re-checks saved IDs; it does not discover new permits in the county GIS.'
+        );
+      } else {
+        setMessage(
+          `Fairfax sync finished: ${total} checks` +
+            (data.counts
+              ? ` (updated ${data.counts.updated}, no_change ${data.counts.no_change}, not_found ${data.counts.not_found}, blocked ${data.counts.blocked || 0}, unsupported ${data.counts.unsupported || 0}, unavailable ${data.counts.unavailable}, failed ${data.counts.failed})`
+              : '')
+        );
+      }
       await refreshLists();
       if (tab === 'attention') {
         setAttention((await api('/api/attention')).items);
@@ -690,19 +738,29 @@ export default function App() {
   }
 
   async function applyBulk() {
-    if (!selectedIds.length) return;
+    if (!selectedIds.length) {
+      setMessage('Select one or more permits before applying a bulk update.');
+      return;
+    }
     const patch = {};
     if (bulk.internal_status) patch.internal_status = bulk.internal_status;
     if (bulk.owner) patch.owner = bulk.owner;
-    if (!Object.keys(patch).length) return;
-    await api('/api/permits/bulk', {
+    if (!Object.keys(patch).length) {
+      setMessage('Choose a bulk internal status and/or owner before Apply bulk.');
+      return;
+    }
+    const data = await api('/api/permits/bulk', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ids: selectedIds, patch }),
     });
     setSelected(new Set());
-    setMessage(`Bulk updated ${selectedIds.length}.`);
+    setMessage(`Bulk updated ${data.changed ?? selectedIds.length} of ${selectedIds.length}.`);
     await refreshLists();
+    // Refresh open detail so a later Save cannot silently reverse the bulk write.
+    if (detail?.id && selectedIds.includes(detail.id)) {
+      await openDetail(detail.id);
+    }
   }
 
   async function importStoreWorkbook() {
@@ -877,7 +935,8 @@ export default function App() {
           <div className="toolbar">
             <input
               type="search"
-              placeholder="Search community, lot, housetype, ID, notes…"
+              placeholder="Filter saved records (community, lot, ID, notes)…"
+              title="Filters permits already imported into this app. Does not search Fairfax County GIS for new permits."
               value={q}
               onChange={(e) => setQ(e.target.value)}
             />
@@ -1071,7 +1130,13 @@ export default function App() {
             >
               Export + reviewed
             </a>
-            <button type="button" className="btn primary" disabled={busy} onClick={syncFairfaxShaped}>
+            <button
+              type="button"
+              className="btn primary"
+              disabled={busy}
+              title="Re-checks imported Fairfax County official IDs against live GIS. Does not discover new permits."
+              onClick={syncFairfaxShaped}
+            >
               Run Fairfax checks
             </button>
           </div>
@@ -1098,6 +1163,33 @@ export default function App() {
             </button>
           </div>
 
+          {(!stats || stats.permits === 0) && (
+            <div className="empty-state" role="status">
+              <h2>No permits imported yet</h2>
+              <p>
+                Permit Ledger tracks workbook rows you import. Searching or filtering the table only
+                narrows <strong>saved</strong> records — it does not discover new permits in Fairfax
+                County GIS.
+              </p>
+              <p className="muted">
+                <strong>Run Fairfax checks</strong> re-checks official IDs already saved with Fairfax
+                County jurisdiction. With zero imports, it correctly reports 0 checks.
+              </p>
+              <div className="empty-actions">
+                <button
+                  type="button"
+                  className="btn primary"
+                  onClick={() => {
+                    setMessage('');
+                    setTab('import');
+                  }}
+                >
+                  Go to Import
+                </button>
+              </div>
+            </div>
+          )}
+
           <div className="layout">
             <div className="table-wrap">
               <table>
@@ -1114,6 +1206,18 @@ export default function App() {
                   </tr>
                 </thead>
                 <tbody>
+                  {stats?.permits > 0 && permits.length === 0 ? (
+                    <tr>
+                      <td colSpan={8}>
+                        <div className="empty-state compact">
+                          <p>
+                            No saved permits match the current filter/search. Clear search or filters
+                            to see imported rows again. This search does not query Fairfax GIS.
+                          </p>
+                        </div>
+                      </td>
+                    </tr>
+                  ) : null}
                   {permits.map((p) => (
                     <tr
                       key={p.id}
@@ -1222,6 +1326,16 @@ export default function App() {
                         />
                       </div>
                     ))}
+                    <label className="muted">
+                      <input
+                        type="checkbox"
+                        checked={Boolean(detail.jurisdiction_confirmed)}
+                        onChange={(e) =>
+                          setDetail({ ...detail, jurisdiction_confirmed: e.target.checked ? 1 : 0 })
+                        }
+                      />{' '}
+                      Jurisdiction confirmed (required for operational live checks)
+                    </label>
                     <div className="field">
                       <label>Official status (connector · read-only)</label>
                       <input readOnly value={detail.official_status ?? ''} />
@@ -1722,12 +1836,25 @@ export default function App() {
                       className="btn"
                       disabled={busy || !detail.primary_official_id}
                       onClick={() => runSync(detail.id)}
+                      title="Requires activated source + confirmed jurisdiction for operational live checks"
                     >
                       Check source
                     </button>
-                    <button type="button" className="btn" disabled={busy} onClick={() => runSync(detail.id, true)}>
-                      Simulate failure
-                    </button>
+                    {meta.simulateFailureEnabled ? (
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={busy}
+                        title="Test-only: set PERMIT_ALLOW_SIMULATE_FAILURE=1"
+                        onClick={async () => {
+                          setMessage(
+                            'Simulate failure is confined to explicit test config and is not exposed on this operational path.'
+                          );
+                        }}
+                      >
+                        Simulate failure
+                      </button>
+                    ) : null}
                   </div>
                   <h3>Change history</h3>
                   <ul className="history">
@@ -1820,9 +1947,16 @@ export default function App() {
             references. Indirect Cost / 2018 IRC / Corewall / WHSD are archived (not wiped).
           </p>
           <div className="toolbar">
-            <button type="button" className="btn primary" disabled={busy} onClick={importStoreWorkbook}>
-              Import store source workbook
-            </button>
+            {meta.storeWorkbookAvailable ? (
+              <button type="button" className="btn primary" disabled={busy} onClick={importStoreWorkbook}>
+                Import store source workbook
+              </button>
+            ) : (
+              <p className="muted">
+                Stored source workbook is not available on this host. Upload a .xlsx file below — that
+                is the primary hosted import path.
+              </p>
+            )}
             <label className="btn">
               Preview upload
               <input
@@ -2038,6 +2172,18 @@ export default function App() {
             <div className={`attention-item ${connectResult.status}`}>
               <strong>{connectResult.status}</strong>
               <div>{connectResult.message}</div>
+              {connectResult.ambiguousFairfax ? (
+                <div className="muted">
+                  Fairfax is ambiguous — pick Fairfax County or City of Fairfax explicitly.
+                </div>
+              ) : null}
+              {(connectResult.namedLimits || []).length ? (
+                <ul className="history">
+                  {connectResult.namedLimits.map((n) => (
+                    <li key={n}>{n}</li>
+                  ))}
+                </ul>
+              ) : null}
               <div className="muted">autoConnect={String(connectResult.autoConnect)}</div>
               {(connectResult.namedLimits || []).slice(0, 6).map((l) => (
                 <div key={l} className="muted">

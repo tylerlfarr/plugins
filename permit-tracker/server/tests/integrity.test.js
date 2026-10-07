@@ -35,13 +35,21 @@ function importFixture() {
   return { buf, parsed, summary };
 }
 
-test('sanitized fixture parses 8 sheets and two sections', () => {
+test('sanitized fixture parses 8 sheets and three sections', () => {
   const { parsed, summary } = importFixture();
   assert.equal(parsed.sheets.length, 8);
-  assert.equal(parsed.permitTracker.sections.length, 2);
-  assert.ok(summary.permits_created >= 4);
+  assert.equal(parsed.permitTracker.sections.length, 3);
+  assert.ok(summary.permits_created >= 5);
   assert.ok(summary.archived_rows > 0);
   assert.ok(summary.mst_ids >= 2);
+  const ffx = db
+    .prepare(
+      `SELECT jurisdiction_code, primary_official_id FROM permit_records
+       WHERE primary_official_id = 'BLDR-2026-00263' AND record_origin = 'import'`
+    )
+    .get();
+  assert.ok(ffx);
+  assert.equal(ffx.jurisdiction_code, 'fairfax_county');
   // Multi-record: ZNA + BLD on same lot → 2 permit records
   const multi = db
     .prepare(

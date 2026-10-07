@@ -93,9 +93,16 @@ export async function checkPermit({
 }
 
 export function listConnectors() {
-  return Object.values(JURISDICTIONS).map((j) => ({
-    ...j,
-    live: j.mode === 'live',
-    fieldAvailability: j.code === 'fairfax_county' ? FAIRFAX_FIELD_AVAILABILITY : null,
-  }));
+  const seen = new Set();
+  return Object.values(JURISDICTIONS)
+    .filter((j) => {
+      if (seen.has(j.code)) return false;
+      seen.add(j.code);
+      return true;
+    })
+    .map((j) => ({
+      ...j,
+      live: j.mode === 'live',
+      fieldAvailability: j.code === 'fairfax_county' ? FAIRFAX_FIELD_AVAILABILITY : null,
+    }));
 }

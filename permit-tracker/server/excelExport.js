@@ -1,6 +1,63 @@
 import XLSX from 'xlsx';
 import { db } from './db.js';
 
+const PERMIT_EXPORT_HEADERS = [
+  'permit_record_id',
+  'project_code',
+  'community_name',
+  'lot_label',
+  'housetype',
+  'jurisdiction_code',
+  'jurisdiction_source',
+  'jurisdiction_confirmed',
+  'primary_official_id',
+  'all_official_ids',
+  'readiness_state',
+  'target_start',
+  'days_to_start',
+  'readiness_summary',
+  'outstanding_prereqs',
+  'verification_gaps',
+  'source_native_status',
+  'official_status',
+  'internal_status',
+  'work_type_permit_kind',
+  'use_classification',
+  'use_classification_official',
+  'use_classification_official_label',
+  'use_classification_source',
+  'use_classification_manual',
+  'owner',
+  'next_action',
+  'next_action_due',
+  'notes_raw',
+  'source_url',
+  'last_check_outcome',
+  'last_successful_check_at',
+  'progress_anchor_at',
+  'last_check_error',
+];
+
+const ATTENTION_HEADERS = [
+  'kind',
+  'message',
+  'created_at',
+  'acknowledged',
+  'resolved_at',
+  'community_name',
+  'lot_label',
+  'primary_official_id',
+  'official_status',
+  'permit_record_id',
+];
+
+function sheetFromRows(rows, headers) {
+  if (!rows.length) {
+    return XLSX.utils.aoa_to_sheet([headers]);
+  }
+  return XLSX.utils.json_to_sheet(rows, { header: headers });
+}
+
 /**
  * Structured coexistence export (not a proven round-trip).
  * Import-origin records only — fixtures/demo probes excluded.
@@ -8,6 +65,9 @@ import { db } from './db.js';
  * Contact package defaults to confirmed only. Pass includeReviewedCandidates
  * to also include reviewed candidates. Never includes rejected/outdated/sandbox/fixture.
  * Provider export eligibility is separate from having an API token.
+ *
+ * Filters scope Permits / Attention / Properties / Contacts to matching permits.
+ * Revisions / Masterfile / MST sheets remain workbook-wide and are labeled as such.
  */
 export function exportCoexistenceXlsx({
   contactStatuses = ['confirmed'],
@@ -18,7 +78,6 @@ export function exportCoexistenceXlsx({
     ? [...new Set([...contactStatuses, 'candidate'])]
     : contactStatuses;
 
-  // Optional permit filters (same knobs as Permits view: use, jurisdiction, status, date-ish).
   let where = `p.record_origin = 'import'`;
   const params = [];
   if (filters.use_classification) {
@@ -93,6 +152,10 @@ export function exportCoexistenceXlsx({
     )
     .all(...params);
 
+  const permitIdSet = new Set(permitRows.map((r) => r.permit_record_id));
+  const filtered = permitIdSet.size > 0;
+  const idList = [...permitIdSet];
+
   const milestoneStmt = db.prepare(
     `SELECT key, label, value, value_kind FROM internal_milestones WHERE permit_record_id = ? ORDER BY key`
   );
@@ -108,6 +171,7 @@ export function exportCoexistenceXlsx({
       mileObj[m.label || m.key] = m.value;
     }
     return {
+      permit_record_id: r.permit_record_id,
       project_code: r.project_code,
       community_name: r.community_name,
       lot_label: r.lot_label,
@@ -157,32 +221,37 @@ export function exportCoexistenceXlsx({
     };
   });
 
-  const attention = db
-    .prepare(
-      `SELECT a.kind, a.message, a.created_at, a.acknowledged, a.resolved_at,
-              cs.community_name, lg.lot_label, p.primary_official_id, p.official_status
+  let attentionSql = `SELECT a.kind, a.message, a.created_at, a.acknowledged, a.resolved_at,
+              cs.community_name, lg.lot_label, p.primary_official_id, p.official_status,
+              a.permit_record_id
        FROM attention_events a
        LEFT JOIN permit_records p ON p.id = a.permit_record_id
        LEFT JOIN lot_groups lg ON lg.id = p.lot_group_id
        LEFT JOIN community_sections cs ON cs.id = lg.section_id
        WHERE a.acknowledged = 0 AND a.resolved_at IS NULL
-         AND (p.id IS NULL OR p.record_origin = 'import')
-       ORDER BY a.created_at DESC`
-    )
-    .all();
+         AND (p.id IS NULL OR p.record_origin = 'import')`;
+  const attentionParams = [];
+  if (filtered) {
+    attentionSql += ` AND a.permit_record_id IN (${idList.map(() => '?').join(',')})`;
+    attentionParams.push(...idList);
+  } else if (Object.keys(filters).some((k) => filters[k])) {
+    // Filters active but zero permits → empty scoped attention
+    attentionSql += ' AND 1=0';
+  }
+  attentionSql += ' ORDER BY a.created_at DESC';
+  const attention = db.prepare(attentionSql).all(...attentionParams);
 
+  // Workbook-wide reference sheets (not permit-filter scoped) — labeled in sheet names.
   const revisions = db.prepare('SELECT * FROM permit_revisions ORDER BY id').all();
   const masterfile = db.prepare('SELECT * FROM plan_tracker_rows ORDER BY id').all();
   const mst = db.prepare('SELECT * FROM mst_reference_ids ORDER BY id').all();
 
   const statusPlaceholders = statuses.map(() => '?').join(',');
-  const contacts = db
-    .prepare(
-      `SELECT c.role, c.full_name, c.company, c.phone, c.email, c.mailing_address,
+  let contactsSql = `SELECT c.role, c.full_name, c.company, c.phone, c.email, c.mailing_address,
               c.provider, c.provider_source, c.retrieved_at, c.validation_state, c.status,
               c.restriction_flags_json, c.record_origin,
               pr.site_address, pr.city, pr.state, pr.zip, pr.parcel_apn,
-              cs.project_code, cs.community_name, lg.lot_label
+              cs.project_code, cs.community_name, lg.lot_label, c.permit_record_id
        FROM contacts c
        LEFT JOIN properties pr ON pr.id = c.property_id
        LEFT JOIN lot_groups lg ON lg.id = c.lot_group_id
@@ -190,31 +259,65 @@ export function exportCoexistenceXlsx({
        WHERE c.record_origin NOT IN ('sandbox_demo','local_fixture')
          AND c.status IN (${statusPlaceholders})
          AND c.status NOT IN ('rejected','outdated')
-         AND (c.provider_source IS NULL OR c.provider_source NOT IN ('hosted_sandbox','local_fixture','sandbox_fabricated'))
-       ORDER BY c.id`
-    )
-    .all(...statuses);
+         AND (c.provider_source IS NULL OR c.provider_source NOT IN ('hosted_sandbox','local_fixture','sandbox_fabricated'))`;
+  const contactParams = [...statuses];
+  if (filtered) {
+    contactsSql += ` AND c.permit_record_id IN (${idList.map(() => '?').join(',')})`;
+    contactParams.push(...idList);
+  } else if (Object.keys(filters).some((k) => filters[k])) {
+    contactsSql += ' AND 1=0';
+  }
+  contactsSql += ' ORDER BY c.id';
+  const contacts = db.prepare(contactsSql).all(...contactParams);
 
-  const properties = db
-    .prepare(
-      `SELECT pr.*, cs.project_code, cs.community_name, lg.lot_label, pl.link_state
+  let propertiesSql = `SELECT pr.*, cs.project_code, cs.community_name, lg.lot_label, pl.link_state, pl.permit_record_id
        FROM properties pr
        LEFT JOIN property_links pl ON pl.property_id = pr.id
        LEFT JOIN lot_groups lg ON lg.id = pl.lot_group_id
        LEFT JOIN community_sections cs ON cs.id = lg.section_id
-       WHERE pr.record_origin NOT IN ('sandbox_demo','local_fixture')
-       ORDER BY pr.id`
-    )
-    .all();
+       WHERE pr.record_origin NOT IN ('sandbox_demo','local_fixture')`;
+  const propertyParams = [];
+  if (filtered) {
+    propertiesSql += ` AND pl.permit_record_id IN (${idList.map(() => '?').join(',')})`;
+    propertyParams.push(...idList);
+  } else if (Object.keys(filters).some((k) => filters[k])) {
+    propertiesSql += ' AND 1=0';
+  }
+  propertiesSql += ' ORDER BY pr.id';
+  const properties = db.prepare(propertiesSql).all(...propertyParams);
 
   const wb = XLSX.utils.book_new();
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(flat), 'Permit Tracker Export');
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(attention), 'Attention');
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(revisions), 'Permit Revisions');
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(masterfile), 'Masterfile Plan Tracker');
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(mst), 'MST Reference IDs');
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(properties), 'Properties');
-  XLSX.utils.book_append_sheet(wb, XLSX.utils.json_to_sheet(contacts), 'Contacts');
+  const permitHeaders = [
+    ...PERMIT_EXPORT_HEADERS,
+    ...Object.keys(flat[0] || {}).filter((k) => !PERMIT_EXPORT_HEADERS.includes(k)),
+  ];
+  XLSX.utils.book_append_sheet(wb, sheetFromRows(flat, permitHeaders), 'Permit Tracker Export');
+  XLSX.utils.book_append_sheet(wb, sheetFromRows(attention, ATTENTION_HEADERS), 'Attention');
+  XLSX.utils.book_append_sheet(
+    wb,
+    sheetFromRows(revisions, revisions[0] ? Object.keys(revisions[0]) : ['id', 'community', 'lot', 'note']),
+    'Permit Revisions (workbook)'
+  );
+  XLSX.utils.book_append_sheet(
+    wb,
+    sheetFromRows(masterfile, masterfile[0] ? Object.keys(masterfile[0]) : ['id', 'product', 'notes']),
+    'Masterfile (workbook)'
+  );
+  XLSX.utils.book_append_sheet(
+    wb,
+    sheetFromRows(mst, mst[0] ? Object.keys(mst[0]) : ['id', 'official_id', 'jurisdiction_hint']),
+    'MST IDs (workbook)'
+  );
+  XLSX.utils.book_append_sheet(
+    wb,
+    sheetFromRows(properties, properties[0] ? Object.keys(properties[0]) : ['id', 'site_address', 'city', 'state']),
+    'Properties'
+  );
+  XLSX.utils.book_append_sheet(
+    wb,
+    sheetFromRows(contacts, contacts[0] ? Object.keys(contacts[0]) : ['role', 'full_name', 'status']),
+    'Contacts'
+  );
   return XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
 }
 
@@ -223,9 +326,11 @@ export function inspectExportBuffer(buf) {
   const wb = XLSX.read(buf, { type: 'buffer' });
   const contacts = XLSX.utils.sheet_to_json(wb.Sheets.Contacts || {});
   const permitRows = XLSX.utils.sheet_to_json(wb.Sheets['Permit Tracker Export'] || {});
+  const attention = XLSX.utils.sheet_to_json(wb.Sheets.Attention || {});
   const permits = permitRows.map((r) => ({
     id: Number(r.permit_record_id),
     use_classification: r.use_classification,
+    primary_official_id: r.primary_official_id,
   }));
   return {
     sheetNames: wb.SheetNames,
@@ -234,6 +339,8 @@ export function inspectExportBuffer(buf) {
     contactOrigins: [...new Set(contacts.map((c) => c.record_origin))],
     contacts,
     permits,
+    attentionCount: attention.length,
     propertyCount: XLSX.utils.sheet_to_json(wb.Sheets.Properties || {}).length,
+    emptyPermitHeaders: permitRows.length === 0 && Boolean(wb.Sheets['Permit Tracker Export']),
   };
 }

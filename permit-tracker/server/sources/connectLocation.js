@@ -8,27 +8,45 @@ import { inspectArcGisUrl } from './arcgisDiscover.js';
 const JURISDICTION_ALIASES = {
   'fairfax county': 'fairfax_county',
   'fairfax county va': 'fairfax_county',
+  'ffx county': 'fairfax_county',
   'city of fairfax': 'city_of_fairfax',
+  'fairfax city': 'city_of_fairfax',
   'loudoun county': 'loudoun_county',
   loudoun: 'loudoun_county',
   'prince william county': 'prince_william_county',
   'prince william': 'prince_william_county',
   pwc: 'prince_william_county',
-  'houston': 'city_of_houston',
+  houston: 'city_of_houston',
   'city of houston': 'city_of_houston',
   'harris county': 'harris_county',
 };
 
+/**
+ * Normalize location inputs to a jurisdiction code.
+ * Bare "Fairfax" (city vs county) returns null with ambiguousFairfax=true — caller must ask.
+ */
 export function normalizeJurisdiction({ state, city, county, town, jurisdiction_code }) {
   if (jurisdiction_code) return String(jurisdiction_code);
   const blob = [county, city, town, state].filter(Boolean).join(' ').toLowerCase().trim();
-  for (const [k, v] of Object.entries(JURISDICTION_ALIASES)) {
+  // Prefer longer / more specific aliases first
+  const ordered = Object.entries(JURISDICTION_ALIASES).sort((a, b) => b[0].length - a[0].length);
+  for (const [k, v] of ordered) {
     if (blob.includes(k)) return v;
+  }
+  // Ambiguous bare Fairfax — do not guess County vs City
+  if (/\bfairfax\b/.test(blob) && !blob.includes('county') && !blob.includes('city')) {
+    return null;
   }
   if (blob.includes('virginia') || blob === 'va' || /\bva\b/.test(blob)) {
     return null; // need county
   }
   return null;
+}
+
+export function fairfaxAmbiguity({ state, city, county, town, jurisdiction_code } = {}) {
+  if (jurisdiction_code) return false;
+  const blob = [county, city, town, state].filter(Boolean).join(' ').toLowerCase().trim();
+  return /\bfairfax\b/.test(blob) && !blob.includes('county') && !blob.includes('city');
 }
 
 /**
@@ -46,6 +64,7 @@ export async function connectLocation({
   activate = false,
   reviewed_by,
 } = {}) {
+  const ambiguousFairfax = fairfaxAmbiguity({ state, city, county, town, jurisdiction_code });
   const code =
     normalizeJurisdiction({ state, city, county, town, jurisdiction_code }) || 'unresolved';
 
@@ -78,7 +97,12 @@ export async function connectLocation({
   let status;
   let namedLimits = [];
 
-  if (code === 'unresolved') {
+  if (ambiguousFairfax) {
+    status = 'no_suitable_source';
+    namedLimits.push(
+      '“Fairfax” is ambiguous. Choose Fairfax County (Building Records PLUS) or City of Fairfax (separate AHJ — unsupported here).'
+    );
+  } else if (code === 'unresolved') {
     status = 'no_suitable_source';
     namedLimits.push('Could not resolve jurisdiction from state/city/county — specify county or jurisdiction_code');
   } else if (connected.length) {
@@ -113,6 +137,7 @@ export async function connectLocation({
   return {
     input: { state, city, county, town, jurisdiction_code: code, record_type: rt, portal_url },
     status,
+    ambiguousFairfax,
     // never imply every county auto-connects
     autoConnect: false,
     verifiedSources: verifiedForType.map(summarize),
