@@ -29,6 +29,7 @@ import {
   getStoredAssessment,
   rebuildAllReadiness,
   updateLotReadiness,
+  listRevisionImpactedLots,
   DEFAULT_RULESET,
 } from './readiness.js';
 import {
@@ -107,6 +108,13 @@ import {
   loginThrottleKey,
   COOKIE_NAME,
 } from './auth.js';
+import {
+  attachWorkspace,
+  publicWorkspace,
+  ensureDefaultWorkspace,
+  listIncompleteMasterfileRows,
+  listOpenRevisions,
+} from './workspace.js';
 import XLSX from 'xlsx';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -254,6 +262,7 @@ app.use(
 );
 app.use(express.json({ limit: '4mb' }));
 app.use(attachAuth);
+app.use(attachWorkspace);
 app.use((req, res, next) => {
   requestActor.run({ actor: req.actor }, next);
 });
@@ -406,10 +415,13 @@ app.get('/api/auth/users', requireAuth, requireOwner, (_req, res) => {
 
 app.get('/api/meta', requireAuth, (req, res) => {
   const rules = getReadinessRuleset();
+  const workspace = publicWorkspace(req.workspace) || publicWorkspace(ensureDefaultWorkspace());
   res.json({
     user: currentUser(),
     authUser: publicUser(req.user),
     authEnabled: authEnabled(),
+    workspace,
+    workspaceIsolation: 'single_db',
     staleDays: Number(getSetting('stale_days', '14')),
     approachingStartDays: Number(rules.approachingStartDays || 21),
     demoMode: getSetting('demo_mode', '0') === '1',
@@ -434,6 +446,16 @@ app.get('/api/meta', requireAuth, (req, res) => {
     tracerfy: tracerfyConfig(),
     tracerfySetupNote:
       'Connect Tracerfy to enable live lookups: set TRACERFY_API_TOKEN, tracerfy_spend_limit_credits, tracerfy_commercial_confirmed=1, and tracerfy_production_enabled=1 in the host environment/secrets (see docs/deploy.md). Never paste tokens in chat.',
+  });
+});
+
+app.get('/api/workspace', requireAuth, (req, res) => {
+  const ws = publicWorkspace(req.workspace) || publicWorkspace(ensureDefaultWorkspace());
+  res.json({
+    workspace: ws,
+    isolation: 'single_db',
+    note:
+      'Pilot: one database file = one business. All authenticated members see the full workbook in this DB. Do not add a second customer to the same DB.',
   });
 });
 
@@ -531,7 +553,7 @@ app.get('/api/readiness/rules', (_req, res) => {
   res.json({ ruleset: getReadinessRuleset(), defaults: DEFAULT_RULESET });
 });
 
-app.put('/api/readiness/rules', (req, res) => {
+app.put('/api/readiness/rules', requireOwner, (req, res) => {
   const body = req.body || {};
   const next = setReadinessRuleset({
     ...getReadinessRuleset(),
@@ -547,7 +569,7 @@ app.put('/api/readiness/rules', (req, res) => {
   res.json({ ruleset: next, counts: rebuilt.counts });
 });
 
-app.post('/api/readiness/rebuild', (_req, res) => {
+app.post('/api/readiness/rebuild', requireOwner, (_req, res) => {
   const rebuilt = rebuildAllReadiness();
   rebuildAttention();
   res.json(rebuilt.counts);
@@ -835,7 +857,16 @@ app.get('/api/attention', (_req, res) => {
        ORDER BY a.created_at DESC`
     )
     .all();
-  res.json({ items, staleDays: Number(getSetting('stale_days', '14')) });
+  const incompleteMasterfile = listIncompleteMasterfileRows();
+  const openRevisions = listOpenRevisions();
+  const revisionImpacted = listRevisionImpactedLots();
+  res.json({
+    items,
+    staleDays: Number(getSetting('stale_days', '14')),
+    incompleteMasterfile,
+    openRevisions,
+    revisionImpacted,
+  });
 });
 
 app.post('/api/attention/:id/ack', (req, res) => {
@@ -1235,6 +1266,17 @@ app.post('/api/import/workbook/commit', (req, res) => {
             error:
               'Preview session expired or unknown. Preview the workbook again, then commit that preview.',
             code: 'preview_expired',
+          });
+        }
+        if (
+          authEnabled() &&
+          sess.actor &&
+          currentUser() &&
+          sess.actor !== currentUser()
+        ) {
+          return res.status(403).json({
+            error: 'This preview belongs to another signed-in user. Preview the workbook again.',
+            code: 'preview_actor_mismatch',
           });
         }
         buffer = sess.buffer;

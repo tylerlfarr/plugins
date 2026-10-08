@@ -30,6 +30,33 @@ function jurisdictionLabel(code) {
   return JURISDICTION_OPTIONS.find((o) => o.value === code)?.label || code || '—';
 }
 
+const HISTORY_FIELD_LABELS = {
+  owner: 'Owner',
+  next_action: 'Next action',
+  next_action_due: 'Next action due',
+  internal_status: 'Internal status',
+  official_status: 'Official status',
+  primary_official_id: 'Official ID',
+  jurisdiction_code: 'Jurisdiction',
+  jurisdiction_confirmed: 'Jurisdiction confirmed',
+  jurisdiction_source: 'Jurisdiction source',
+  source_url: 'Source URL',
+  permit_kind: 'Permit kind',
+  lot_group_id: 'Lot group',
+  use_classification_manual: 'Use classification (manual)',
+  readiness_state: 'Workbook readiness',
+};
+
+function historyFieldLabel(field) {
+  const key = String(field || '');
+  if (HISTORY_FIELD_LABELS[key]) return HISTORY_FIELD_LABELS[key];
+  if (key.startsWith('milestone:')) {
+    const rest = key.slice('milestone:'.length).replace(/_/g, ' ');
+    return `Milestone · ${rest}`;
+  }
+  return key || '—';
+}
+
 /** Session-expiry / revoke: callers clear local drafts; never silent-restore after re-login. */
 let onAuthExpired = null;
 
@@ -142,6 +169,8 @@ export default function App() {
   const [crosswalkMissing, setCrosswalkMissing] = useState([]);
   const [waiverForm, setWaiverForm] = useState({ milestone_key: '', reason: '' });
   const [attention, setAttention] = useState([]);
+  const [incompleteMasterfile, setIncompleteMasterfile] = useState([]);
+  const [openRevisions, setOpenRevisions] = useState([]);
   const [bulk, setBulk] = useState({ internal_status: '', owner: '' });
   const [message, setMessage] = useState('');
   const [importPreview, setImportPreview] = useState(null); // includes previewId for commit-from-preview
@@ -796,6 +825,8 @@ export default function App() {
       Promise.all([api('/api/attention'), api('/api/schedule/preview'), api('/api/conflicts')]).then(
         ([a, s, c]) => {
           setAttention(a.items);
+          setIncompleteMasterfile(a.incompleteMasterfile || []);
+          setOpenRevisions(a.openRevisions || []);
           setSchedule(s);
           setConflicts(c.conflicts);
         }
@@ -2489,7 +2520,7 @@ export default function App() {
                   <ul className="history">
                     {history.map((h) => (
                       <li key={h.id}>
-                        <strong>{h.field}</strong> · {h.changed_by} · {h.source}
+                        <strong>{historyFieldLabel(h.field)}</strong> · {h.changed_by} · {h.source}
                         <div className="muted mono">
                           {h.old_value || '∅'} → {h.new_value || '∅'}
                         </div>
@@ -2526,6 +2557,50 @@ export default function App() {
                 ))}
               </ul>
               <div className="muted">{schedule.digestPreview?.note}</div>
+            </div>
+          ) : null}
+          {openRevisions.length > 0 ? (
+            <div className="attention-item warn">
+              <strong>Open permit revisions: {openRevisions.length}</strong>
+              <p className="muted" style={{ margin: '4px 0 8px' }}>
+                Received-revised-permit is still blank. Review impact on linked lots — do not treat as
+                auto-invalidation.
+              </p>
+              <ul className="history">
+                {openRevisions.map((r) => (
+                  <li key={r.id}>
+                    <div>
+                      {r.community_code || '—'} / {r.lot || '—'}
+                      {r.reason ? ` · ${r.reason}` : ''}
+                    </div>
+                    <div className="muted">
+                      Submitted {r.date_submitted || '—'} · revised start {r.revised_start_sheet || '—'}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : null}
+          {incompleteMasterfile.length > 0 ? (
+            <div className="attention-item">
+              <strong>Incomplete masterfile rows: {incompleteMasterfile.length}</strong>
+              <p className="muted" style={{ margin: '4px 0 8px' }}>
+                Plan-tracker rows missing an approved date. Read-only — coordinate outside the app or
+                re-import when the workbook advances.
+              </p>
+              <ul className="history">
+                {incompleteMasterfile.map((m) => (
+                  <li key={m.id}>
+                    <div>
+                      {m.neighborhood || m.product_name || m.house_type || `Row ${m.id}`}
+                      {m.product_name ? ` · ${m.product_name}` : ''}
+                    </div>
+                    <div className="muted">
+                      Missing: {(m.missing || []).join(', ') || 'date_approved'}
+                    </div>
+                  </li>
+                ))}
+              </ul>
             </div>
           ) : null}
           {conflicts.length > 0 ? (

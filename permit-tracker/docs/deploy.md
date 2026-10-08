@@ -130,6 +130,7 @@ Open `http://localhost:4173` → sign-in → import bundled sanitized fixture �
 
 ## Boundaries
 
-- One business per DB — not multi-tenant SaaS this milestone.
+- One business per DB — not multi-tenant SaaS this milestone. See [workspace-pilot.md](./workspace-pilot.md): membership tables exist; domain rows are not yet filtered by workspace. Never share one DB across customers.
+- Owner role required to change readiness rules / rebuild; operators remain full-workbook peers inside the DB.
 - PWC / Loudoun unsupported for live retrieve until demonstrated.
 - Production Tracerfy stays off until token + spend cap + commercial confirmation + legal OK.

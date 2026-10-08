@@ -259,6 +259,73 @@ export function buildSanitizedWorkbookBuffer() {
     // Public Fairfax PLUS RECORDID in PREFIX-YYYY-n shape (live Issued sample)
     'BLDR-2026-00263',
   ]);
+  // No-lot occupancy / sales-office style row (lot blank; housetype present)
+  pt.push([
+    'Demo Fairfax Ridge',
+    '',
+    'Sales Office',
+    '3/5/26',
+    '3/6/26',
+    '3/7/26',
+    nearIso(40),
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    'ALTC-2026-88001',
+  ]);
+  // Multi-permit group: one lot row → two official IDs (shared lot_group)
+  pt.push([
+    'Demo Fairfax Ridge',
+    '88',
+    'Twin Pair',
+    '3/8/26',
+    '3/9/26',
+    '3/10/26',
+    nearIso(50),
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    'ALTC-2026-88011 / ALTC-2026-88012',
+  ]);
+  // Empty trailing section header (0 data rows) — must not become a project on commit
+  pt.push([
+    'Proj ID',
+    'Lot',
+    'Housetype',
+    'StartSheet',
+    'Target',
+    'Permit',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+    '',
+  ]);
+  pt.push(['', 'ID', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '', '']);
 
   XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(pt), 'Permit Tracker');
 

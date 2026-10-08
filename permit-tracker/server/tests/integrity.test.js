@@ -38,8 +38,11 @@ function importFixture() {
 test('sanitized fixture parses 8 sheets and three sections', () => {
   const { parsed, summary } = importFixture();
   assert.equal(parsed.sheets.length, 8);
-  assert.equal(parsed.permitTracker.sections.length, 3);
-  assert.ok(summary.permits_created >= 5);
+  // Includes empty trailing header block (skipped on commit — not a project)
+  assert.equal(parsed.permitTracker.sections.length, 4);
+  assert.equal(summary.sections, 3);
+  assert.ok(summary.sections_skipped_empty >= 1);
+  assert.ok(summary.permits_created >= 8);
   assert.ok(summary.archived_rows > 0);
   assert.ok(summary.mst_ids >= 2);
   const ffx = db

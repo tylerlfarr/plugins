@@ -148,6 +148,14 @@ export function assertRecognizedWorkbook(parsed, filename = '') {
     err.code = 'unrecognized_profile';
     throw err;
   }
+  const rowCount = parsed?.permitTracker?.rows?.length || 0;
+  if (rowCount === 0) {
+    const err = new Error(
+      'No recognized permit data rows found. The workbook has Permit Tracker headers but zero importable lot/data rows (blank or incomplete sections only).'
+    );
+    err.code = 'zero_recognized_rows';
+    throw err;
+  }
 }
 
 export function parseWorkbookBuffer(buffer) {
@@ -600,9 +608,17 @@ export function commitWorkbookParse(parsed, { changedBy, replaceSecondary = true
     }
 
     const sectionIds = new Map();
+    summary.sections_skipped_empty = 0;
     for (const s of parsed.permitTracker.sections) {
+      const sectionKey = `${s.project_code}::${s.community_name}`;
+      const hasRows = (parsed.permitTracker.rows || []).some((r) => r.sectionKey === sectionKey);
+      // Do not promote blank / incomplete trailing headers as projects (Phase 0 Q7).
+      if (!hasRows) {
+        summary.sections_skipped_empty += 1;
+        continue;
+      }
       const id = upsertSection(s);
-      sectionIds.set(`${s.project_code}::${s.community_name}`, id);
+      sectionIds.set(sectionKey, id);
       summary.sections += 1;
     }
 

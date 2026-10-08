@@ -8,6 +8,13 @@
 
 import crypto from 'node:crypto';
 import { db, getSetting, setSetting } from './db.js';
+import {
+  ensureDefaultWorkspace,
+  ensureUserWorkspaceMembership,
+  backfillWorkspaceMemberships,
+  getUserWorkspace,
+  publicWorkspace,
+} from './workspace.js';
 
 export const COOKIE_NAME = 'permit_ledger_session';
 export const ROLES = Object.freeze({ OWNER: 'owner', OPERATOR: 'operator' });
@@ -46,6 +53,9 @@ export function ensureAuthTables() {
       created_at TEXT NOT NULL DEFAULT (datetime('now'))
     );
   `);
+  // Workspace membership hedge — safe no-op when already present.
+  ensureDefaultWorkspace();
+  backfillWorkspaceMemberships();
 }
 
 function scryptHash(password, salt = crypto.randomBytes(16).toString('hex')) {
@@ -149,7 +159,9 @@ export function bootstrapOwnerFromEnv() {
     )
     .run(email, process.env.OWNER_DISPLAY_NAME || 'Owner', scryptHash(password));
   setSetting('business_name', process.env.BUSINESS_NAME || 'Single-business pilot');
-  return db.prepare('SELECT * FROM users WHERE id = ?').get(Number(info.lastInsertRowid));
+  const owner = db.prepare('SELECT * FROM users WHERE id = ?').get(Number(info.lastInsertRowid));
+  ensureUserWorkspaceMembership(owner.id, ROLES.OWNER);
+  return owner;
 }
 
 export function createInvite({ email, role = ROLES.OPERATOR, createdBy = null, days = 7 } = {}) {
@@ -190,7 +202,9 @@ export function createUser({ email, password, displayName = '', role = ROLES.OPE
        VALUES (?, ?, ?, ?)`
     )
     .run(login, displayName || login.split('@')[0], ROLES.OPERATOR, scryptHash(password));
-  return publicUser(db.prepare('SELECT * FROM users WHERE id = ?').get(Number(info.lastInsertRowid)));
+  const created = db.prepare('SELECT * FROM users WHERE id = ?').get(Number(info.lastInsertRowid));
+  ensureUserWorkspaceMembership(created.id, ROLES.OPERATOR);
+  return publicUser(created);
 }
 
 export function listUsers() {
@@ -237,6 +251,7 @@ export function acceptInvite({ token, password, displayName = '' }) {
     user = db.prepare('SELECT * FROM users WHERE id = ?').get(user.id);
   }
   db.prepare(`UPDATE invites SET used_at = datetime('now') WHERE id = ?`).run(inv.id);
+  ensureUserWorkspaceMembership(user.id, user.role === ROLES.OWNER ? ROLES.OWNER : ROLES.OPERATOR);
   return user;
 }
 
@@ -319,11 +334,13 @@ export function userFromToken(token) {
 
 export function publicUser(user) {
   if (!user) return null;
+  const workspace = publicWorkspace(getUserWorkspace(user.id));
   return {
     id: user.id,
     email: user.email,
     display_name: user.display_name,
     role: user.role,
+    workspace,
   };
 }
 
