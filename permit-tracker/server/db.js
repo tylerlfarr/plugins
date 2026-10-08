@@ -601,6 +601,79 @@ export function migrate() {
   `);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_sync_jobs_status_next ON sync_jobs(status, next_run_at)`);
 
+  // Phase 5 — private Opportunities pipeline (workspace-local; not marketing leads)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS opportunity_searches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      criteria_json TEXT NOT NULL DEFAULT '{}',
+      kind TEXT NOT NULL DEFAULT 'dynamic',
+      last_reviewed_at TEXT,
+      created_by TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS opportunity_groups (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      label TEXT NOT NULL DEFAULT '',
+      group_kind TEXT NOT NULL DEFAULT 'company_or_project',
+      evidence_json TEXT NOT NULL DEFAULT '{}',
+      disposition TEXT NOT NULL DEFAULT 'new',
+      reason TEXT NOT NULL DEFAULT '',
+      assignee TEXT NOT NULL DEFAULT '',
+      next_action TEXT NOT NULL DEFAULT '',
+      next_action_due TEXT,
+      reviewed_link INTEGER NOT NULL DEFAULT 0,
+      link_status TEXT NOT NULL DEFAULT 'proposed',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS opportunities (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_key TEXT NOT NULL DEFAULT 'fairfax_county_building_records_plus',
+      jurisdiction_code TEXT NOT NULL DEFAULT 'fairfax_county',
+      official_id TEXT NOT NULL,
+      activity_summary TEXT NOT NULL DEFAULT '',
+      permit_type TEXT NOT NULL DEFAULT '',
+      official_status TEXT NOT NULL DEFAULT '',
+      source_native_status TEXT NOT NULL DEFAULT '',
+      address TEXT NOT NULL DEFAULT '',
+      city TEXT NOT NULL DEFAULT '',
+      state TEXT NOT NULL DEFAULT '',
+      zip TEXT NOT NULL DEFAULT '',
+      parcel TEXT NOT NULL DEFAULT '',
+      company_evidence TEXT NOT NULL DEFAULT '',
+      role_evidence TEXT NOT NULL DEFAULT '',
+      issued_date TEXT,
+      submitted_date TEXT,
+      approved_date TEXT,
+      source_event_at TEXT,
+      source_url TEXT NOT NULL DEFAULT '',
+      match_reasons_json TEXT NOT NULL DEFAULT '[]',
+      limitations_json TEXT NOT NULL DEFAULT '[]',
+      evidence_json TEXT NOT NULL DEFAULT '{}',
+      disposition TEXT NOT NULL DEFAULT 'new',
+      reason TEXT NOT NULL DEFAULT '',
+      assignee TEXT NOT NULL DEFAULT '',
+      next_action TEXT NOT NULL DEFAULT '',
+      next_action_due TEXT,
+      group_id INTEGER REFERENCES opportunity_groups(id) ON DELETE SET NULL,
+      linked_permit_record_id INTEGER REFERENCES permit_records(id) ON DELETE SET NULL,
+      linked_lot_group_id INTEGER REFERENCES lot_groups(id) ON DELETE SET NULL,
+      search_id INTEGER REFERENCES opportunity_searches(id) ON DELETE SET NULL,
+      dedupe_key TEXT NOT NULL UNIQUE,
+      record_origin TEXT NOT NULL DEFAULT 'discovery',
+      created_by TEXT NOT NULL DEFAULT '',
+      updated_by TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_opp_disposition ON opportunities(disposition)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_opp_group ON opportunities(group_id)`);
+
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_lot_stable ON lot_groups(stable_key) WHERE stable_key != ''`);
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_property_identity ON properties(identity_key) WHERE identity_key != ''`);
   db.exec(`

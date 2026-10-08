@@ -90,10 +90,20 @@ async function api(path, options = {}) {
 
 const TABS = [
   { id: 'permits', label: 'Permits' },
+  { id: 'opportunities', label: 'Opportunities' },
   { id: 'attention', label: 'Attention' },
   { id: 'import', label: 'Import' },
   { id: 'sources', label: 'Sources' },
   { id: 'connectors', label: 'Connectors' },
+];
+
+const OPP_DISPOSITIONS = [
+  { value: 'new', label: 'New' },
+  { value: 'reviewing', label: 'Reviewing' },
+  { value: 'qualified', label: 'Qualified' },
+  { value: 'follow_up', label: 'Follow-up' },
+  { value: 'not_relevant', label: 'Not relevant' },
+  { value: 'archived', label: 'Archived' },
 ];
 
 export default function App() {
@@ -196,6 +206,26 @@ export default function App() {
     displayName: '',
   });
   const [usersList, setUsersList] = useState([]);
+  const [oppCoverage, setOppCoverage] = useState(null);
+  const [oppCoverageAck, setOppCoverageAck] = useState(false);
+  const [oppSearchForm, setOppSearchForm] = useState({
+    jurisdiction_code: 'fairfax_county',
+    issued_from: '',
+    issued_to: '',
+    app_type_alias: 'Residential',
+    record_status: '',
+    address_contains: '',
+    result_record_count: '25',
+  });
+  const [oppSearchResult, setOppSearchResult] = useState(null);
+  const [oppSelectedHits, setOppSelectedHits] = useState(new Set());
+  const [oppPipeline, setOppPipeline] = useState([]);
+  const [oppPipelineFilter, setOppPipelineFilter] = useState('');
+  const [oppSelectedIds, setOppSelectedIds] = useState(new Set());
+  const [oppSearches, setOppSearches] = useState([]);
+  const [oppGroups, setOppGroups] = useState([]);
+  const [oppDetail, setOppDetail] = useState(null);
+  const [oppLinkPermitId, setOppLinkPermitId] = useState('');
 
   const connectors = meta.connectors || [];
   const isOwner = Boolean(
@@ -836,7 +866,155 @@ export default function App() {
       api('/api/sources').then((d) => setSources(d.sources || []));
       if (isOwner) refreshUsers();
     }
+    if (tab === 'opportunities') {
+      Promise.all([
+        api('/api/opportunities/coverage'),
+        api('/api/opportunities'),
+        api('/api/opportunity-searches'),
+        api('/api/opportunity-groups'),
+      ])
+        .then(([cov, pipe, searches, groups]) => {
+          setOppCoverage(cov);
+          setOppPipeline(pipe.items || []);
+          setOppSearches(searches.searches || []);
+          setOppGroups(groups.groups || []);
+        })
+        .catch((e) => setMessage(String(e.message || e)));
+    }
   }, [tab, authGate, isOwner]);
+
+  async function refreshOppPipeline() {
+    const [pipe, groups, searches] = await Promise.all([
+      api(`/api/opportunities${oppPipelineFilter ? `?disposition=${encodeURIComponent(oppPipelineFilter)}` : ''}`),
+      api('/api/opportunity-groups'),
+      api('/api/opportunity-searches'),
+    ]);
+    setOppPipeline(pipe.items || []);
+    setOppGroups(groups.groups || []);
+    setOppSearches(searches.searches || []);
+  }
+
+  async function runOppSearch() {
+    if (!oppCoverageAck) {
+      setMessage('Acknowledge coverage limitations before searching.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const body = {
+        ...oppSearchForm,
+        result_record_count: Number(oppSearchForm.result_record_count) || 25,
+      };
+      const data = await api('/api/opportunities/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      setOppSearchResult(data);
+      setOppSelectedHits(new Set());
+      setMessage(data.message || data.status);
+    } catch (e) {
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveSelectedHits() {
+    const hits = (oppSearchResult?.results || []).filter((r) =>
+      oppSelectedHits.has(r.officialId)
+    );
+    if (!hits.length) {
+      setMessage('Select discovery hits to save to the private watchlist.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const out = await api('/api/opportunities/save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ candidates: hits }),
+      });
+      setMessage(
+        `Saved ${out.saved?.length || 0} new · deduped ${out.deduped?.length || 0} (private pipeline)`
+      );
+      await refreshOppPipeline();
+    } catch (e) {
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function saveOppSearchCriteria(kind = 'dynamic') {
+    setBusy(true);
+    try {
+      const criteria =
+        kind === 'static_list'
+          ? {
+              official_ids: [...oppSelectedIds]
+                .map((id) => oppPipeline.find((o) => o.id === id)?.official_id)
+                .filter(Boolean),
+            }
+          : { ...oppSearchForm };
+      const name =
+        kind === 'static_list'
+          ? `Static list ${new Date().toISOString().slice(0, 10)}`
+          : `Fairfax ${oppSearchForm.app_type_alias || 'browse'} ${oppSearchForm.issued_from || ''}`.trim();
+      await api('/api/opportunity-searches', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, criteria, kind }),
+      });
+      setMessage(kind === 'static_list' ? 'Saved static selected list' : 'Saved dynamic search criteria');
+      await refreshOppPipeline();
+    } catch (e) {
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function patchOpp(id, patch) {
+    setBusy(true);
+    try {
+      const data = await api(`/api/opportunities/${id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(patch),
+      });
+      setOppDetail(data.item);
+      await refreshOppPipeline();
+      setMessage('Opportunity updated');
+    } catch (e) {
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function linkOppToProject(id) {
+    const permitRecordId = Number(oppLinkPermitId);
+    if (!Number.isFinite(permitRecordId)) {
+      setMessage('Enter an existing import permit record id — lots are never invented.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const data = await api(`/api/opportunities/${id}/link-project`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ permitRecordId }),
+      });
+      setOppDetail(data.item);
+      await refreshOppPipeline();
+      setMessage('Linked to existing project permit (facts not copied)');
+    } catch (e) {
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
 
   async function runConnectLocation() {
     setBusy(true);
@@ -1741,7 +1919,8 @@ export default function App() {
               </p>
               <p className="muted">
                 <strong>Run Fairfax checks</strong> re-checks official IDs already saved with Fairfax
-                County jurisdiction. With zero imports, it correctly reports 0 checks.
+                County jurisdiction. With zero imports, it correctly reports 0 checks. To browse
+                public Fairfax activity without imports, use the <strong>Opportunities</strong> tab.
               </p>
               <div className="empty-actions">
                 <button
@@ -1753,6 +1932,16 @@ export default function App() {
                   }}
                 >
                   Go to Import
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => {
+                    setMessage('');
+                    setTab('opportunities');
+                  }}
+                >
+                  Open Opportunities
                 </button>
               </div>
             </div>
@@ -2600,6 +2789,563 @@ export default function App() {
             </aside>
           </div>
         </>
+      )}
+
+      {tab === 'opportunities' && (
+        <div className="panel stack">
+          <h2>Opportunities — public activity discovery</h2>
+          <p className="muted">
+            Workbook-free Fairfax County browse for residential builder/developer relationship
+            prospecting. Separate from Permits table search and from Run Fairfax checks (known-ID
+            re-check). Opportunities stay workspace-private and never auto-convert into marketing
+            leads. No paid contacts in this phase.
+          </p>
+
+          <div className="banner warn" role="region" aria-label="Coverage limitations">
+            <strong>Coverage limitations (ack before search)</strong>
+            <ul className="history">
+              {(oppCoverage?.sources || [])
+                .filter((s) => s.jurisdiction_code === 'fairfax_county')
+                .flatMap((s) => s.limitations || [])
+                .map((l) => (
+                  <li key={l}>{l}</li>
+                ))}
+              {(oppCoverage?.sources || [])
+                .filter((s) => s.status === 'unsupported')
+                .map((s) => (
+                  <li key={s.jurisdiction_code}>
+                    {s.label}: unsupported — {(s.limitations || [])[0] || 'no live discovery'}
+                  </li>
+                ))}
+            </ul>
+            <p className="muted">
+              Transparent match rules (not AI scores):{' '}
+              {(oppCoverage?.match_rules || [])
+                .map((r) => r.label)
+                .slice(0, 5)
+                .join(' · ')}
+            </p>
+            <label className="muted" style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <input
+                type="checkbox"
+                checked={oppCoverageAck}
+                onChange={(e) => setOppCoverageAck(e.target.checked)}
+              />
+              I understand issued-only Fairfax coverage is not early-intent LO signal
+            </label>
+          </div>
+
+          <h3>Discover (Fairfax public layer)</h3>
+          <div className="toolbar">
+            <select
+              value={oppSearchForm.jurisdiction_code}
+              onChange={(e) =>
+                setOppSearchForm((f) => ({ ...f, jurisdiction_code: e.target.value }))
+              }
+            >
+              <option value="fairfax_county">Fairfax County (supported)</option>
+              <option value="loudoun_county">Loudoun (unsupported)</option>
+              <option value="prince_william_county">Prince William (unsupported)</option>
+              <option value="west_virginia">West Virginia (unsupported)</option>
+            </select>
+            <label className="muted">
+              Issued from{' '}
+              <input
+                type="date"
+                value={oppSearchForm.issued_from}
+                onChange={(e) => setOppSearchForm((f) => ({ ...f, issued_from: e.target.value }))}
+              />
+            </label>
+            <label className="muted">
+              Issued to{' '}
+              <input
+                type="date"
+                value={oppSearchForm.issued_to}
+                onChange={(e) => setOppSearchForm((f) => ({ ...f, issued_to: e.target.value }))}
+              />
+            </label>
+            <input
+              placeholder="APPTYPEALIAS contains (e.g. Residential)"
+              value={oppSearchForm.app_type_alias}
+              onChange={(e) => setOppSearchForm((f) => ({ ...f, app_type_alias: e.target.value }))}
+            />
+            <input
+              placeholder="Address contains"
+              value={oppSearchForm.address_contains}
+              onChange={(e) =>
+                setOppSearchForm((f) => ({ ...f, address_contains: e.target.value }))
+              }
+            />
+            <input
+              placeholder="RECORD_STATUS equals"
+              value={oppSearchForm.record_status}
+              onChange={(e) => setOppSearchForm((f) => ({ ...f, record_status: e.target.value }))}
+            />
+            <button
+              type="button"
+              className="btn primary"
+              disabled={busy || !oppCoverageAck}
+              onClick={runOppSearch}
+            >
+              Search public activity
+            </button>
+            <button
+              type="button"
+              className="btn"
+              disabled={busy}
+              onClick={() => saveOppSearchCriteria('dynamic')}
+            >
+              Save dynamic criteria
+            </button>
+          </div>
+
+          {oppSearchResult ? (
+            <div className={`attention-item ${oppSearchResult.status === 'failed' || oppSearchResult.status === 'unsupported' ? 'warn' : ''}`}>
+              <strong>
+                Result status: {oppSearchResult.status}
+              </strong>
+              <div>{oppSearchResult.message}</div>
+              <div className="muted">
+                Page {oppSearchResult.page?.offset ?? 0} · showing {oppSearchResult.page?.limit ?? 0}{' '}
+                (cap {oppSearchResult.page?.limitRequested ?? 25}) · zero / partial / unsupported /
+                failed are distinct outcomes
+              </div>
+              <div className="toolbar" style={{ marginTop: 8 }}>
+                <button
+                  type="button"
+                  className="btn primary"
+                  disabled={busy || !oppSelectedHits.size}
+                  onClick={saveSelectedHits}
+                >
+                  Add selected to private watchlist ({oppSelectedHits.size})
+                </button>
+              </div>
+              <div className="opp-results">
+                {(oppSearchResult.results || []).map((r) => (
+                  <article key={r.officialId} className="opp-card">
+                    <header>
+                      <label>
+                        <input
+                          type="checkbox"
+                          checked={oppSelectedHits.has(r.officialId)}
+                          onChange={(e) => {
+                            setOppSelectedHits((prev) => {
+                              const n = new Set(prev);
+                              if (e.target.checked) n.add(r.officialId);
+                              else n.delete(r.officialId);
+                              return n;
+                            });
+                          }}
+                        />{' '}
+                        <span className="mono">{r.officialId}</span>
+                      </label>
+                      {r.already_saved ? <span className="pill warn">already saved</span> : null}
+                      <span className="pill">{r.intent_label}</span>
+                    </header>
+                    <p>{r.activity_summary}</p>
+                    <p className="muted">
+                      Type: {r.permitType || '—'} · Status: {r.sourceNativeStatus || '—'} · Issued:{' '}
+                      {r.issuedDate || '—'} · Event: {r.sourceEventAt || '—'}
+                    </p>
+                    <p className="muted">
+                      Address: {r.address || '—'}
+                      {r.city ? `, ${r.city}` : ''} · Parcel: {r.parcel || '—'}
+                    </p>
+                    <p className="muted">
+                      Company evidence: {r.companyEvidence || 'unavailable on this layer'} · Role
+                      evidence: {r.roleEvidence || 'unavailable on this layer'}
+                    </p>
+                    <p className="muted">
+                      Why match:{' '}
+                      {(r.match_reasons || []).map((m) => m.detail || m.rule).join(' · ') || '—'}
+                    </p>
+                    <p className="muted">Limitations: {(r.limitations || []).join(' · ')}</p>
+                    <p className="muted">{r.intent_note}</p>
+                  </article>
+                ))}
+              </div>
+            </div>
+          ) : null}
+
+          <h3>Private pipeline</h3>
+          <div className="toolbar">
+            <select
+              value={oppPipelineFilter}
+              onChange={(e) => {
+                setOppPipelineFilter(e.target.value);
+              }}
+              onBlur={() => refreshOppPipeline().catch((e) => setMessage(String(e.message || e)))}
+            >
+              <option value="">All dispositions</option>
+              {OPP_DISPOSITIONS.map((d) => (
+                <option key={d.value} value={d.value}>
+                  {d.label}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="btn"
+              disabled={busy}
+              onClick={() => refreshOppPipeline().catch((e) => setMessage(String(e.message || e)))}
+            >
+              Refresh pipeline
+            </button>
+            <button
+              type="button"
+              className="btn"
+              disabled={busy || !oppSelectedIds.size}
+              onClick={() => saveOppSearchCriteria('static_list')}
+            >
+              Save static selected list
+            </button>
+            <button
+              type="button"
+              className="btn"
+              disabled={busy || oppSelectedIds.size < 2}
+              onClick={async () => {
+                setBusy(true);
+                try {
+                  const out = await api('/api/opportunity-groups/propose', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ opportunityIds: [...oppSelectedIds] }),
+                  });
+                  setMessage(
+                    `Proposed ${out.groups?.length || 0} group(s) from parcel/address evidence (reversible)`
+                  );
+                  await refreshOppPipeline();
+                } catch (e) {
+                  setMessage(String(e.message || e));
+                } finally {
+                  setBusy(false);
+                }
+              }}
+            >
+              Group selected (evidence)
+            </button>
+            {oppSelectedIds.size ? (
+              <a
+                className="btn"
+                href={`/api/opportunities-export.xlsx?${new URLSearchParams({
+                  selectedIds: [...oppSelectedIds].join(','),
+                })}`}
+              >
+                Export selected ({oppSelectedIds.size})
+              </a>
+            ) : (
+              <a className="btn" href="/api/opportunities-export.xlsx">
+                Export pipeline
+              </a>
+            )}
+          </div>
+
+          <div className="layout">
+            <div className="table-wrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th></th>
+                    <th>Official ID</th>
+                    <th>Activity</th>
+                    <th>Disposition</th>
+                    <th>Assignee</th>
+                    <th>Next</th>
+                    <th>Group</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {oppPipeline.length === 0 ? (
+                    <tr>
+                      <td colSpan={7}>
+                        <span className="muted">
+                          Empty watchlist — search Fairfax public activity above (blank workspace
+                          OK).
+                        </span>
+                      </td>
+                    </tr>
+                  ) : (
+                    oppPipeline.map((o) => (
+                      <tr
+                        key={o.id}
+                        className={oppDetail?.id === o.id ? 'selected' : ''}
+                        onClick={() => {
+                          setOppDetail(o);
+                          setOppLinkPermitId(o.linked_permit_record_id ? String(o.linked_permit_record_id) : '');
+                        }}
+                      >
+                        <td>
+                          <input
+                            type="checkbox"
+                            checked={oppSelectedIds.has(o.id)}
+                            onChange={(e) => {
+                              e.stopPropagation();
+                              setOppSelectedIds((prev) => {
+                                const n = new Set(prev);
+                                if (e.target.checked) n.add(o.id);
+                                else n.delete(o.id);
+                                return n;
+                              });
+                            }}
+                          />
+                        </td>
+                        <td className="mono">{o.official_id}</td>
+                        <td>{o.activity_summary}</td>
+                        <td>{o.disposition_label || o.disposition}</td>
+                        <td>{o.assignee || '—'}</td>
+                        <td>
+                          {o.next_action || '—'}
+                          {o.next_action_due ? ` · ${o.next_action_due}` : ''}
+                        </td>
+                        <td>{o.group_id || '—'}</td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <aside className="detail">
+              {oppDetail ? (
+                <>
+                  <h3 className="mono">{oppDetail.official_id}</h3>
+                  <p>{oppDetail.activity_summary}</p>
+                  <p className="muted">
+                    Intent: issued_activity — not early-intent. Company/role:{' '}
+                    {oppDetail.company_evidence || 'unavailable'} /{' '}
+                    {oppDetail.role_evidence || 'unavailable'}
+                  </p>
+                  <div className="field">
+                    <label htmlFor="opp-disp">Disposition</label>
+                    <select
+                      id="opp-disp"
+                      value={oppDetail.disposition}
+                      onChange={(e) => patchOpp(oppDetail.id, { disposition: e.target.value })}
+                    >
+                      {OPP_DISPOSITIONS.map((d) => (
+                        <option key={d.value} value={d.value}>
+                          {d.label}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="field">
+                    <label htmlFor="opp-assignee">Assignee</label>
+                    <input
+                      id="opp-assignee"
+                      value={oppDetail.assignee || ''}
+                      onChange={(e) =>
+                        setOppDetail((d) => ({ ...d, assignee: e.target.value }))
+                      }
+                      onBlur={() => patchOpp(oppDetail.id, { assignee: oppDetail.assignee })}
+                    />
+                  </div>
+                  <div className="field">
+                    <label htmlFor="opp-reason">Reason</label>
+                    <input
+                      id="opp-reason"
+                      value={oppDetail.reason || ''}
+                      onChange={(e) => setOppDetail((d) => ({ ...d, reason: e.target.value }))}
+                      onBlur={() => patchOpp(oppDetail.id, { reason: oppDetail.reason })}
+                    />
+                  </div>
+                  <div className="field">
+                    <label htmlFor="opp-next">Next action</label>
+                    <input
+                      id="opp-next"
+                      value={oppDetail.next_action || ''}
+                      onChange={(e) =>
+                        setOppDetail((d) => ({ ...d, next_action: e.target.value }))
+                      }
+                      onBlur={() =>
+                        patchOpp(oppDetail.id, {
+                          next_action: oppDetail.next_action,
+                          next_action_due: oppDetail.next_action_due,
+                        })
+                      }
+                    />
+                  </div>
+                  <div className="field">
+                    <label htmlFor="opp-due">Next action date</label>
+                    <input
+                      id="opp-due"
+                      type="date"
+                      value={oppDetail.next_action_due || ''}
+                      onChange={(e) =>
+                        setOppDetail((d) => ({ ...d, next_action_due: e.target.value }))
+                      }
+                      onBlur={() =>
+                        patchOpp(oppDetail.id, { next_action_due: oppDetail.next_action_due })
+                      }
+                    />
+                  </div>
+                  <div className="field">
+                    <label htmlFor="opp-link">Link existing import permit id</label>
+                    <div className="toolbar">
+                      <input
+                        id="opp-link"
+                        className="mono"
+                        placeholder="permit_records.id"
+                        value={oppLinkPermitId}
+                        onChange={(e) => setOppLinkPermitId(e.target.value)}
+                      />
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={busy}
+                        onClick={() => linkOppToProject(oppDetail.id)}
+                      >
+                        Link project
+                      </button>
+                      {oppDetail.linked_permit_record_id ? (
+                        <button
+                          type="button"
+                          className="btn ghost"
+                          disabled={busy}
+                          onClick={async () => {
+                            setBusy(true);
+                            try {
+                              const data = await api(
+                                `/api/opportunities/${oppDetail.id}/unlink-project`,
+                                { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }
+                              );
+                              setOppDetail(data.item);
+                              await refreshOppPipeline();
+                            } catch (e) {
+                              setMessage(String(e.message || e));
+                            } finally {
+                              setBusy(false);
+                            }
+                          }}
+                        >
+                          Unlink
+                        </button>
+                      ) : null}
+                    </div>
+                    <p className="muted">Never invents a lot — import permit/lot must already exist.</p>
+                  </div>
+                  <p className="muted">
+                    Why match:{' '}
+                    {(oppDetail.match_reasons || [])
+                      .map((m) => m.detail || m.rule)
+                      .join(' · ') || '—'}
+                  </p>
+                </>
+              ) : (
+                <p className="muted">Select a pipeline row to qualify, assign follow-up, or link.</p>
+              )}
+            </aside>
+          </div>
+
+          <h3>Saved searches</h3>
+          <ul className="history">
+            {oppSearches.length === 0 ? (
+              <li className="muted">No saved dynamic criteria or static lists yet.</li>
+            ) : (
+              oppSearches.map((s) => (
+                <li key={s.id}>
+                  <strong>{s.name}</strong> · {s.kind}
+                  {s.last_reviewed_at ? ` · last review ${s.last_reviewed_at}` : ' · never reviewed'}
+                  <button
+                    type="button"
+                    className="btn"
+                    style={{ marginLeft: 8 }}
+                    disabled={busy}
+                    onClick={async () => {
+                      setBusy(true);
+                      try {
+                        const data = await api(`/api/opportunity-searches/${s.id}/run`, {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: '{}',
+                        });
+                        if (s.kind === 'dynamic') setOppSearchResult(data);
+                        setMessage(
+                          `${data.message || 'Ran search'} · new-since-review flags applied when watermark set`
+                        );
+                      } catch (e) {
+                        setMessage(String(e.message || e));
+                      } finally {
+                        setBusy(false);
+                      }
+                    }}
+                  >
+                    Run
+                  </button>
+                  <button
+                    type="button"
+                    className="btn"
+                    style={{ marginLeft: 4 }}
+                    disabled={busy}
+                    onClick={async () => {
+                      await api(`/api/opportunity-searches/${s.id}/reviewed`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: '{}',
+                      });
+                      setMessage('Watermark set — New since last review');
+                      await refreshOppPipeline();
+                    }}
+                  >
+                    Mark reviewed
+                  </button>
+                </li>
+              ))
+            )}
+          </ul>
+
+          <h3>Candidate groups</h3>
+          <p className="muted">
+            Related permits grouped by parcel or address stem when evidence allows. Links are
+            proposed until reviewed; unlinking is reversible. No per-row contact charges.
+          </p>
+          {oppGroups.length === 0 ? (
+            <p className="muted">No groups yet — select 2+ related pipeline rows and Group selected.</p>
+          ) : (
+            oppGroups.map((g) => (
+              <div key={g.id} className="attention-item">
+                <strong>
+                  {g.label}
+                </strong>{' '}
+                <span className="pill">{g.link_status}</span>
+                <div className="muted">
+                  Evidence: {g.evidence?.rule || '—'} · {g.member_count} members · {g.disposition}
+                </div>
+                <div className="toolbar">
+                  <button
+                    type="button"
+                    className="btn"
+                    disabled={busy}
+                    onClick={async () => {
+                      await api(`/api/opportunity-groups/${g.id}/link-status`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ status: 'reviewed' }),
+                      });
+                      await refreshOppPipeline();
+                    }}
+                  >
+                    Mark reviewed
+                  </button>
+                  <button
+                    type="button"
+                    className="btn ghost"
+                    disabled={busy}
+                    onClick={async () => {
+                      await api(`/api/opportunity-groups/${g.id}/link-status`, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ status: 'unlinked' }),
+                      });
+                      await refreshOppPipeline();
+                    }}
+                  >
+                    Unlink (reversible)
+                  </button>
+                </div>
+              </div>
+            ))
+          )}
+        </div>
       )}
 
       {tab === 'attention' && (

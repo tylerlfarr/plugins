@@ -32,6 +32,29 @@ import {
   ensureSyncJobTables,
 } from './syncJobs.js';
 import {
+  getDiscoveryCoverage,
+  searchOpportunities,
+  saveOpportunities,
+  listOpportunities,
+  getOpportunity,
+  updateOpportunity,
+  linkOpportunityToProject,
+  unlinkOpportunityFromProject,
+  saveSearch,
+  listSearches,
+  getSearch,
+  markSearchReviewed,
+  runSavedSearch,
+  proposeGroups,
+  listGroups,
+  getGroup,
+  reviewGroupLink,
+  updateGroup,
+  exportOpportunitiesXlsx,
+  ensureOpportunityTables,
+  OPPORTUNITY_DISPOSITIONS,
+} from './opportunities.js';
+import {
   getReadinessRuleset,
   setReadinessRuleset,
   assessPermitReadiness,
@@ -1064,6 +1087,166 @@ app.get('/api/connectors', (_req, res) => {
       last_successful_check_at: 'Most recent successful observe',
     },
   });
+});
+
+// --- Phase 5 Opportunities (private pipeline; workbook-free discovery) ---
+ensureOpportunityTables();
+
+app.get('/api/opportunities/coverage', (_req, res) => {
+  res.json(getDiscoveryCoverage());
+});
+
+app.post('/api/opportunities/search', async (req, res) => {
+  try {
+    const result = await searchOpportunities(req.body || {});
+    res.json(result);
+  } catch (err) {
+    res.status(500).json({ status: 'failed', error: err.message || String(err), results: [] });
+  }
+});
+
+app.get('/api/opportunities', (req, res) => {
+  const items = listOpportunities({
+    disposition: req.query.disposition || null,
+    q: req.query.q || '',
+    groupId: req.query.groupId || null,
+  });
+  res.json({ items, dispositions: OPPORTUNITY_DISPOSITIONS });
+});
+
+app.get('/api/opportunities/:id', (req, res) => {
+  const item = getOpportunity(req.params.id);
+  if (!item) return res.status(404).json({ error: 'Not found' });
+  res.json({ item });
+});
+
+app.post('/api/opportunities/save', (req, res) => {
+  const candidates = Array.isArray(req.body?.candidates) ? req.body.candidates : [];
+  if (!candidates.length) {
+    return res.status(400).json({ error: 'candidates array required' });
+  }
+  const out = saveOpportunities(candidates, {
+    actor: currentUser(),
+    searchId: req.body?.searchId ?? null,
+  });
+  res.json(out);
+});
+
+app.patch('/api/opportunities/:id', (req, res) => {
+  try {
+    const item = updateOpportunity(req.params.id, req.body || {}, { actor: currentUser() });
+    res.json({ item });
+  } catch (err) {
+    const code = err.code === 'not_found' ? 404 : err.code === 'invalid_disposition' ? 400 : 500;
+    res.status(code).json({ error: err.message });
+  }
+});
+
+app.post('/api/opportunities/:id/link-project', (req, res) => {
+  try {
+    const item = linkOpportunityToProject(req.params.id, {
+      permitRecordId: req.body?.permitRecordId ?? req.body?.permit_record_id ?? null,
+      lotGroupId: req.body?.lotGroupId ?? req.body?.lot_group_id ?? null,
+    });
+    res.json({ item });
+  } catch (err) {
+    const code =
+      err.code === 'not_found' || err.code === 'permit_not_found' || err.code === 'lot_not_found'
+        ? 404
+        : err.code === 'link_target_required'
+          ? 400
+          : 500;
+    res.status(code).json({ error: err.message });
+  }
+});
+
+app.post('/api/opportunities/:id/unlink-project', (req, res) => {
+  const item = unlinkOpportunityFromProject(req.params.id);
+  if (!item) return res.status(404).json({ error: 'Not found' });
+  res.json({ item });
+});
+
+app.get('/api/opportunity-searches', (_req, res) => {
+  res.json({ searches: listSearches() });
+});
+
+app.post('/api/opportunity-searches', (req, res) => {
+  try {
+    const search = saveSearch({
+      name: req.body?.name,
+      criteria: req.body?.criteria || {},
+      kind: req.body?.kind || 'dynamic',
+      actor: currentUser(),
+    });
+    res.json({ search });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.post('/api/opportunity-searches/:id/run', async (req, res) => {
+  try {
+    const result = await runSavedSearch(req.params.id);
+    res.json(result);
+  } catch (err) {
+    const code = err.code === 'not_found' ? 404 : 500;
+    res.status(code).json({ error: err.message });
+  }
+});
+
+app.post('/api/opportunity-searches/:id/reviewed', (req, res) => {
+  const search = getSearch(req.params.id);
+  if (!search) return res.status(404).json({ error: 'Not found' });
+  res.json({ search: markSearchReviewed(req.params.id) });
+});
+
+app.get('/api/opportunity-groups', (_req, res) => {
+  res.json({ groups: listGroups() });
+});
+
+app.post('/api/opportunity-groups/propose', (req, res) => {
+  const out = proposeGroups({ opportunityIds: req.body?.opportunityIds || [] });
+  res.json(out);
+});
+
+app.get('/api/opportunity-groups/:id', (req, res) => {
+  const group = getGroup(req.params.id);
+  if (!group) return res.status(404).json({ error: 'Not found' });
+  res.json({ group });
+});
+
+app.patch('/api/opportunity-groups/:id', (req, res) => {
+  try {
+    const group = updateGroup(req.params.id, req.body || {});
+    res.json({ group });
+  } catch (err) {
+    const code = err.code === 'not_found' ? 404 : 400;
+    res.status(code).json({ error: err.message });
+  }
+});
+
+app.post('/api/opportunity-groups/:id/link-status', (req, res) => {
+  try {
+    const group = reviewGroupLink(req.params.id, { status: req.body?.status || 'reviewed' });
+    res.json({ group });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+app.get('/api/opportunities-export.xlsx', (req, res) => {
+  let ids = null;
+  if (req.query.selectedIds != null && String(req.query.selectedIds).trim() !== '') {
+    ids = String(req.query.selectedIds)
+      .split(',')
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isFinite(n));
+  }
+  const buf = exportOpportunitiesXlsx({ ids });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', 'attachment; filename="permit-ledger-opportunities.xlsx"');
+  if (ids?.length) res.setHeader('X-Opportunity-Export-Selected-Count', String(ids.length));
+  res.send(Buffer.from(buf));
 });
 
 app.get('/api/sources', (req, res) => {

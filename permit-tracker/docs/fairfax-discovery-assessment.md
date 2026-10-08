@@ -31,7 +31,7 @@ Checking imported IDs ≠ discovering new permits.
 | Loudoun / PWC / other AHJ live retrieve by workbook ID | **Unsupported** → honest `unavailable` |
 | Invented demo property + Find contacts (`local_fixture`) | **Demo-only** (labeled; excluded from operational export) |
 | Production Tracerfy enrichment | **Off** by design until approved |
-| Countywide “find all new Fairfax permits this week” in UI | **Not implemented** (layer can be queried by date/use; app does not) |
+| Countywide “find all new Fairfax permits this week” in UI | **Implemented (Phase 5)** — Opportunities tab: date/use/address browse ≤50/page, private watchlist; issued-heavy limitation labeled (not early-intent) |
 
 ## Discovery without known IDs (feasibility)
 
@@ -46,12 +46,15 @@ Verified against the live PLUS layer (read-only):
 | Deduping | Use `RECORDID` as stable key across pages |
 | Coverage limits | Issued-heavy; pending/comments/holds/inspections **unavailable**; City of Fairfax separate |
 
-This is **not** implemented in the product UI. Feasibility only.
+## Product status (Phase 5)
 
-## Narrow next step (recommendation)
+Implemented on the **Opportunities** tab / `/api/opportunities/*`:
 
-**Do not** treat search-as-discovery. Next scoped step:
+- Coverage limitations shown and acknowledged before search
+- Fairfax PLUS browse by issued date / APPTYPEALIAS / status / address (≤50/page)
+- Private pipeline (New → Archived) with assignee, reason, next action
+- Link to **existing** import permit/lot only (never invents a lot)
+- Dynamic saved criteria vs static selected lists + review watermark
+- Transparent match rules; no paid contacts; issued activity not relabeled as early intent
 
-> Add an **optional, owner-gated “Fairfax GIS browse”** that queries PLUS with a **date window + optional APPTYPEALIAS use filter**, lists candidate `RECORDID`s (read-only, paginated ≤50), and lets the operator **attach selected IDs** to an existing imported lot — or reject. Cap page size, no auto-import of the whole county, no Tracerfy, no other AHJs.
-
-That keeps discovery separate from “Run Fairfax checks” and from table search.
+Still separate from Permits `q` and from **Run Fairfax checks** (known-ID only).

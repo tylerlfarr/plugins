@@ -4,12 +4,12 @@
  *
  * Capabilities (honest):
  * - inspect: metadata / field discovery
- * - discover: search-like probes (not Opportunities UI)
+ * - discover: workbook-free GIS browse (Opportunities); distinct from known-ID fetch
  * - fetch: per-permit status read
  * - refresh: eligible for operational sync jobs
  * - health: endpoint reachability check
  */
-import { checkFairfaxPermit, FAIRFAX_FIELD_AVAILABILITY } from './fairfax.js';
+import { checkFairfaxPermit, discoverFairfaxPermits, FAIRFAX_FIELD_AVAILABILITY } from './fairfax.js';
 import { assertSafeOutboundUrl } from '../sources/ssrf.js';
 
 const UA = 'permit-ledger-adapter-health/1.0 (+read-only)';
@@ -86,6 +86,9 @@ export const ADAPTERS = {
     fieldAvailability: FAIRFAX_FIELD_AVAILABILITY,
     async fetch({ officialId }) {
       return checkFairfaxPermit({ officialId });
+    },
+    async discover(criteria = {}) {
+      return discoverFairfaxPermits(criteria);
     },
     async health(config) {
       return fairfaxHealth(config);
