@@ -2928,8 +2928,10 @@ export default function App() {
                   )}
                   {isOwner && (!tracerfy?.tokenPresent || !tracerfy?.productionGatesOk) ? (
                     <div className="banner warn">
-                      Live paid contact lookup is not connected. Operators can still use an invented
-                      demo property for labeled sandbox contacts, or enter manual contacts.
+                      Live paid contact lookup is not connected
+                      {meta.demoShortcutsAllowed
+                        ? '. Operators can still use an invented demo property for labeled sandbox contacts, or enter manual contacts.'
+                        : '. On this RC host the invented demo-property shortcut is off — use Opportunities fixture contact review or enter manual contacts.'}
                     </div>
                   ) : null}
                   {isOwner ? (
@@ -2989,15 +2991,22 @@ export default function App() {
                     </div>
                   ) : null}
                   <div className="toolbar">
-                    <button
-                      type="button"
-                      className="btn"
-                      disabled={busy}
-                      onClick={createInventedDemoProperty}
-                      title="Creates an invented sandbox_demo address for labeled demo contacts"
-                    >
-                      Create invented demo property
-                    </button>
+                    {meta.demoShortcutsAllowed ? (
+                      <button
+                        type="button"
+                        className="btn"
+                        disabled={busy}
+                        onClick={createInventedDemoProperty}
+                        title="Creates an invented sandbox_demo address for labeled demo contacts"
+                      >
+                        Create invented demo property
+                      </button>
+                    ) : (
+                      <p className="muted">
+                        Invented demo-property shortcut is off on this host (RC default). Use
+                        Opportunities → fixture contact review, or add a manual contact.
+                      </p>
+                    )}
                     <button
                       type="button"
                       className="btn"

@@ -13,6 +13,7 @@ import {
   migrate,
   getDbPath,
   dbIsReady,
+  demoShortcutsAllowed,
   resolveSourceAttentionForPermit as resolveSourceAttention,
 } from './db.js';
 import { listConnectors, FAIRFAX_FIELD_AVAILABILITY } from './connectors/index.js';
@@ -486,6 +487,7 @@ app.get('/api/meta', requireAuth, (req, res) => {
     staleDays: Number(getSetting('stale_days', '14')),
     approachingStartDays: Number(rules.approachingStartDays || 21),
     demoMode: getSetting('demo_mode', '0') === '1',
+    demoShortcutsAllowed: demoShortcutsAllowed(),
     connectors: listConnectors(),
     fairfaxFieldAvailability: FAIRFAX_FIELD_AVAILABILITY,
     readinessRulesetKey: rules.key,
@@ -554,6 +556,7 @@ app.post('/api/settings', requireAuth, requireOwner, (req, res) => {
     staleDays: Number(getSetting('stale_days', '14')),
     user: currentUser(),
     demoMode: getSetting('demo_mode', '0') === '1',
+    demoShortcutsAllowed: demoShortcutsAllowed(),
   });
 });
 
@@ -1826,6 +1829,13 @@ app.get('/api/properties/:id', (req, res) => {
 /** Invented sandbox_demo property for labeled contact demos — never production Tracerfy. */
 app.post('/api/properties/demo-sandbox', (req, res) => {
   try {
+    if (!demoShortcutsAllowed()) {
+      return res.status(403).json({
+        error: 'demo_shortcuts_disabled',
+        detail:
+          'Invented demo-sandbox properties are restricted to disposable envs (demo_mode, PERMIT_DEMO=1, ALLOW_DEMO_SHORTCUTS=1, or test harness). Use fixture contact handoff from Opportunities or manual contacts on RC hosts.',
+      });
+    }
     const { permit_record_id, lot_group_id } = req.body || {};
     if (!lot_group_id) {
       return res.status(400).json({ error: 'lot_group_id required — never implicit attach' });

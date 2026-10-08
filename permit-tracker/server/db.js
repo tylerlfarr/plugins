@@ -750,6 +750,18 @@ export function isDemoMode() {
   return getSetting('demo_mode', '0') === '1' || process.env.PERMIT_DEMO === '1';
 }
 
+/**
+ * Invented demo-sandbox UI/API shortcuts are disposable-only.
+ * Production/RC hosts keep them off unless the owner explicitly enables demo_mode
+ * or sets ALLOW_DEMO_SHORTCUTS=1 / PERMIT_DEMO=1 / PERMIT_TEST_HARNESS=1.
+ */
+export function demoShortcutsAllowed() {
+  if (process.env.ALLOW_DEMO_SHORTCUTS === '1') return true;
+  if (process.env.PERMIT_TEST_HARNESS === '1') return true;
+  if (process.env.PERMIT_DEMO === '1') return true;
+  return getSetting('demo_mode', '0') === '1';
+}
+
 export function recordChange(permitId, field, oldValue, newValue, changedBy, source) {
   const ov = oldValue ?? '';
   const nv = newValue ?? '';
