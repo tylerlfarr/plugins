@@ -3,6 +3,7 @@
  * States: discovered | needs_review | verified | degraded | unsupported
  */
 import { db } from '../db.js';
+import { assertActivatableAdapter, enrichSourceWithAdapter } from '../connectors/adapters.js';
 
 export const SOURCE_STATES = [
   'discovered',
@@ -28,23 +29,59 @@ export const SEED_SOURCES = [
       live: [
         'RECORDID',
         'RECORD_STATUS',
+        'RECORD_STATUS_DATE',
         'SUBMITTED_DATE',
         'APPROVED_DATE',
         'ISSUED_DATE',
         'LINK_URL',
       ],
-      unavailable: ['pending', 'reviewer_comments', 'holds', 'inspections'],
+      unavailable: ['pending', 'reviewer_comments', 'holds', 'inspections', 'publication_at'],
+      capabilities: {
+        applications: false,
+        issued: true,
+        active_status: true,
+        pending: false,
+        inspections: false,
+      },
     }),
     auth_access: 'public_no_auth',
     refresh_frequency: 'near_real_time_gis',
     state: 'verified',
     coverage_limitations:
-      'Issued-heavy Building Records PLUS layer; pending/comments/holds/inspections unavailable on this layer. City of Fairfax is separate.',
+      'Issued-heavy Building Records PLUS layer; applications/pending/comments/holds/inspections unavailable on this layer. City of Fairfax is separate.',
     evidence:
       'Live RO queries return status + milestone dates for ALTC/ALTR/BLDR (BLDC only with confirmed Fairfax mapping).',
     // Seed metadata only — real verification timestamp set after live check
     last_verified_at: null,
     reusable: 1,
+  },
+  {
+    key: 'west_virginia_unsupported',
+    jurisdiction_code: 'west_virginia',
+    agency: 'West Virginia local AHJs (inventory)',
+    record_types: 'building',
+    official_url: '',
+    endpoint: '',
+    platform: 'none',
+    adapter_type: 'none',
+    available_fields_json: JSON.stringify({
+      capabilities: {
+        applications: false,
+        issued: false,
+        active_status: false,
+        pending: false,
+        inspections: false,
+      },
+      machine_readable_api: false,
+    }),
+    auth_access: 'none',
+    refresh_frequency: 'n/a',
+    state: 'unsupported',
+    coverage_limitations:
+      'UNSUPPORTED: no verified WV per-permit connector in this pilot build. Do not present as verified or activatable.',
+    evidence: 'Roadmap pilot inventory only — not investigated as an operational connector this phase.',
+    last_verified_at: null,
+    reusable: 0,
   },
   {
     key: 'pwc_eportal_energov',
@@ -202,14 +239,13 @@ export const SEED_SOURCES = [
 ];
 
 export function ensureSourceRegistrySeeded() {
-  const count = db.prepare('SELECT COUNT(*) AS c FROM source_registry').get().c;
-  if (count > 0) return count;
   const ins = db.prepare(
     `INSERT INTO source_registry(
        key, jurisdiction_code, agency, record_types, official_url, endpoint, platform, adapter_type,
        available_fields_json, auth_access, refresh_frequency, state, coverage_limitations, evidence,
        last_verified_at, reusable, activated
-     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)`
+     ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0)
+     ON CONFLICT(key) DO NOTHING`
   );
   const tx = db.transaction(() => {
     for (const s of SEED_SOURCES) {
@@ -234,7 +270,7 @@ export function ensureSourceRegistrySeeded() {
     }
   });
   tx();
-  return SEED_SOURCES.length;
+  return db.prepare('SELECT COUNT(*) AS c FROM source_registry').get().c;
 }
 
 export function listSources({ jurisdiction_code, state, verifiedOnly } = {}) {
@@ -255,10 +291,19 @@ export function listSources({ jurisdiction_code, state, verifiedOnly } = {}) {
   sql += ` ORDER BY CASE state
     WHEN 'verified' THEN 0 WHEN 'degraded' THEN 1 WHEN 'needs_review' THEN 2
     WHEN 'discovered' THEN 3 ELSE 4 END, jurisdiction_code, key`;
-  return db.prepare(sql).all(...params);
+  return db.prepare(sql).all(...params).map(enrichSourceWithAdapter);
 }
 
 export function getSource(keyOrId) {
+  ensureSourceRegistrySeeded();
+  const row =
+    db.prepare('SELECT * FROM source_registry WHERE key = ? OR id = ?').get(String(keyOrId), Number(keyOrId)) ||
+    null;
+  return row ? enrichSourceWithAdapter(row) : null;
+}
+
+/** Raw row without adapter enrichment (internal). */
+export function getSourceRaw(keyOrId) {
   ensureSourceRegistrySeeded();
   return (
     db.prepare('SELECT * FROM source_registry WHERE key = ? OR id = ?').get(String(keyOrId), Number(keyOrId)) ||
@@ -282,15 +327,13 @@ export function upsertDiscoveryRun({ jurisdiction_code, url, result }) {
 }
 
 export function activateSource(key, { reviewedBy = 'operator' } = {}) {
-  const src = getSource(key);
+  const src = getSourceRaw(key);
   if (!src) throw new Error('Source not found');
   if (src.state !== 'verified' && src.state !== 'degraded') {
     throw new Error(`Source state=${src.state}; only verified/degraded may activate after review`);
   }
-  // Metadata ≠ operational connection — require a real adapter
-  if (!src.adapter_type || src.adapter_type === 'none') {
-    throw new Error('Source has no operational adapter; metadata-only entries cannot activate');
-  }
+  // Metadata ≠ operational connection — require executable adapter + valid config
+  assertActivatableAdapter(src);
   db.prepare(
     `UPDATE source_registry SET activated = 1, activated_at = datetime('now'), activated_by = ? WHERE id = ?`
   ).run(reviewedBy, src.id);

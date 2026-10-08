@@ -104,5 +104,10 @@ export function listConnectors() {
       ...j,
       live: j.mode === 'live',
       fieldAvailability: j.code === 'fairfax_county' ? FAIRFAX_FIELD_AVAILABILITY : null,
+      capabilities: j.capabilities || null,
+      honestLabel:
+        j.mode === 'live'
+          ? 'Operational live connector'
+          : 'Unsupported — checks return unavailable (not fabricated)',
     }));
 }

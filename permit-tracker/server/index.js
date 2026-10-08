@@ -16,12 +16,21 @@ import {
   resolveSourceAttentionForPermit as resolveSourceAttention,
 } from './db.js';
 import { listConnectors, FAIRFAX_FIELD_AVAILABILITY } from './connectors/index.js';
+import { listAdapterContracts } from './connectors/adapters.js';
 import {
   syncPermitById,
   syncAllLinked,
   rebuildAttention,
   getSchedulePreview,
 } from './sync.js';
+import {
+  enqueueSyncJob,
+  getSyncJob,
+  listSyncJobs,
+  startSyncJobWorker,
+  drainSyncJobs,
+  ensureSyncJobTables,
+} from './syncJobs.js';
 import {
   getReadinessRuleset,
   setReadinessRuleset,
@@ -1045,7 +1054,15 @@ app.post('/api/conflicts/:id/resolve', (req, res) => {
 app.get('/api/connectors', (_req, res) => {
   res.json({
     connectors: listConnectors(),
+    adapters: listAdapterContracts(),
     fairfaxFieldAvailability: FAIRFAX_FIELD_AVAILABILITY,
+    dateSemantics: {
+      source_event_at: 'Jurisdiction-reported status/event date (e.g. RECORD_STATUS_DATE)',
+      source_publication_at: 'Distinct publication timestamp when the source exposes one (often unavailable)',
+      source_observed_at: 'When this process observed the payload',
+      last_checked_at: 'Most recent check attempt (any outcome)',
+      last_successful_check_at: 'Most recent successful observe',
+    },
   });
 });
 
@@ -1134,6 +1151,7 @@ app.get('/api/idless-candidates', (_req, res) => {
 app.post('/api/sync/:id', requireAuth, async (req, res) => {
   try {
     // forceFail / allowSynthetic are test-only — never accept from operational HTTP.
+    // Single-record checks stay request-scoped (fast); bulk uses durable jobs.
     const result = await syncPermitById(Number(req.params.id), {
       officialId: req.body?.officialId,
       allowSynthetic: false,
@@ -1148,15 +1166,70 @@ app.post('/api/sync/:id', requireAuth, async (req, res) => {
   }
 });
 
+/**
+ * Bulk sync: enqueue a durable server-side job (leases + retries).
+ * Browser close does not cancel in-flight work. Pass wait=1 / body.wait to
+ * drain in-process (tests / local scripts only).
+ */
 app.post('/api/sync', async (req, res) => {
-  // Attribute bulk/Fairfax sync runs to the authenticated actor when present.
   if (currentUser()) setSetting('current_user', currentUser());
-  const results = await syncAllLinked({
-    fairfaxOnly: Boolean(req.body?.fairfaxOnly),
+  ensureSyncJobTables();
+  const fairfaxOnly = Boolean(req.body?.fairfaxOnly);
+  const { job, coalesced } = enqueueSyncJob({
+    fairfaxOnly,
     trigger: req.body?.trigger || 'manual',
+    createdBy: currentUser() || '',
   });
-  rebuildAttention();
-  res.json(results);
+  const wait =
+    req.body?.wait === true ||
+    req.body?.wait === 1 ||
+    req.query?.wait === '1' ||
+    process.env.PERMIT_SYNC_WAIT === '1' ||
+    process.env.PERMIT_TEST_HARNESS === '1';
+  if (wait) {
+    await drainSyncJobs({ maxTicks: 80 });
+    const finished = getSyncJob(job.id);
+    let summary = {};
+    try {
+      summary = JSON.parse(finished?.summary_json || '{}');
+    } catch {
+      summary = {};
+    }
+    return res.json({
+      job: finished,
+      coalesced,
+      async: false,
+      runId: summary.runId,
+      counts: summary.counts,
+      diagnostic: summary.diagnostic || null,
+      results: [],
+    });
+  }
+  // Ensure worker is running; kick a tick without blocking the response
+  startSyncJobWorker();
+  res.status(202).json({
+    job,
+    coalesced,
+    async: true,
+    message:
+      'Sync job queued on the server. Closing the browser does not cancel it; poll GET /api/sync/jobs/:id.',
+  });
+});
+
+app.get('/api/sync/jobs', (_req, res) => {
+  res.json({ jobs: listSyncJobs({ limit: Number(_req.query.limit) || 25 }) });
+});
+
+app.get('/api/sync/jobs/:id', (req, res) => {
+  const job = getSyncJob(Number(req.params.id));
+  if (!job) return res.status(404).json({ error: 'Job not found' });
+  let summary = {};
+  try {
+    summary = JSON.parse(job.summary_json || '{}');
+  } catch {
+    summary = {};
+  }
+  res.json({ job, summary });
 });
 
 app.get('/api/reviews', (_req, res) => {
@@ -1896,8 +1969,10 @@ if (process.env.PERMIT_NO_LISTEN !== '1') {
   // Owner laptops still cannot use the VM's localhost — that requires open-desktop or a local run.
   const host = process.env.LISTEN_HOST || '0.0.0.0';
   app.listen(port, host, () => {
+    ensureSyncJobTables();
+    startSyncJobWorker();
     console.log(
-      `Permit Ledger on http://${host}:${port} · auth=${authEnabled() ? 'on' : 'off'} · db=${getDbPath()}`
+      `Permit Ledger on http://${host}:${port} · auth=${authEnabled() ? 'on' : 'off'} · db=${getDbPath()} · syncJobs=on`
     );
   });
 }

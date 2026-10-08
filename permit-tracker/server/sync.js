@@ -54,7 +54,11 @@ export function evaluateCheckEligibility(permit) {
   }
   const sources = listSources({ jurisdiction_code: code });
   const activated = sources.filter(
-    (s) => s.activated && (s.state === 'verified' || s.state === 'degraded') && s.adapter_type && s.adapter_type !== 'none'
+    (s) =>
+      s.activated &&
+      (s.state === 'verified' || s.state === 'degraded') &&
+      s.adapter_operational &&
+      s.capabilities?.refresh
   );
   if (!activated.length) {
     const verified = sources.filter((s) => s.state === 'verified' || s.state === 'degraded');
@@ -184,13 +188,36 @@ export function applyConnectorResult(permit, result, changedBy = 'connector', qu
   resolveSourceAttentionForPermit(permit.id);
 
   let changed = false;
+  // Date semantics:
+  // - last_checked_at / observed: every attempt (also set on failure paths above)
+  // - last_successful_check_at: last successful observe
+  // - source_event_at: jurisdiction-reported event/status date (not our observe time)
+  // - source_publication_at: distinct publication timestamp when the layer exposes one
+  const observedAt = result.observedAt || now;
+  const sourceEventAt = result.sourceEventAt || result.fields?.sourceEventDate || null;
+  const publicationAt =
+    result.publicationAt === undefined
+      ? result.fields?.publicationDate ?? null
+      : result.publicationAt;
   const sets = [
     'last_checked_at = ?',
     'last_successful_check_at = ?',
+    'source_observed_at = ?',
     "last_check_error = ''",
     "updated_at = datetime('now')",
   ];
-  const params = [now, now];
+  const params = [now, now, observedAt];
+  if (sourceEventAt) {
+    sets.push('source_event_at = ?');
+    params.push(sourceEventAt);
+  }
+  if (publicationAt) {
+    sets.push('source_publication_at = ?');
+    params.push(publicationAt);
+  } else if (result.publicationAt === null) {
+    // Explicitly unavailable on this source — clear any stale invented value
+    sets.push('source_publication_at = NULL');
+  }
 
   // Establish baseline on first success without status-change attention
   const establishingBaseline = !permit.baseline_snapshot_at;

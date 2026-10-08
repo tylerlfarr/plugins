@@ -34,6 +34,7 @@ function reset() {
     DELETE FROM import_runs;
     DELETE FROM import_commit_keys;
     DELETE FROM check_runs;
+    DELETE FROM sync_jobs;
   `);
 }
 

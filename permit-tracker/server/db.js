@@ -574,6 +574,32 @@ export function migrate() {
   addColumn('permit_records', 'use_classification_manual_by', 'use_classification_manual_by TEXT');
   addColumn('permit_records', 'use_classification_manual_at', 'use_classification_manual_at TEXT');
   addColumn('permit_records', 'row_version', 'row_version INTEGER NOT NULL DEFAULT 1');
+  addColumn('permit_records', 'source_event_at', 'source_event_at TEXT');
+  addColumn('permit_records', 'source_publication_at', 'source_publication_at TEXT');
+  addColumn('permit_records', 'source_observed_at', 'source_observed_at TEXT');
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sync_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      scope TEXT NOT NULL DEFAULT 'linked',
+      trigger TEXT NOT NULL DEFAULT 'manual',
+      status TEXT NOT NULL DEFAULT 'queued',
+      fairfax_only INTEGER NOT NULL DEFAULT 0,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      max_attempts INTEGER NOT NULL DEFAULT 3,
+      lease_owner TEXT,
+      lease_until TEXT,
+      next_run_at TEXT NOT NULL DEFAULT (datetime('now')),
+      started_at TEXT,
+      finished_at TEXT,
+      summary_json TEXT DEFAULT '{}',
+      error TEXT DEFAULT '',
+      created_by TEXT DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_sync_jobs_status_next ON sync_jobs(status, next_run_at)`);
 
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_lot_stable ON lot_groups(stable_key) WHERE stable_key != ''`);
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_property_identity ON properties(identity_key) WHERE identity_key != ''`);

@@ -56,12 +56,20 @@ export async function checkFairfaxPermit({ officialId }) {
       if (features.length === 1) {
         const a = features[0].attributes;
         const native = a.RECORD_STATUS || '';
+        // Date semantics (Phase 4):
+        // - sourceEventAt: when the source says the status/event occurred (RECORD_STATUS_DATE)
+        // - publicationAt: distinct publication timestamp — unavailable on this layer
+        // - observedAt / checkedAt: when this process observed the payload
+        const sourceEventAt = epochMsToDate(a.RECORD_STATUS_DATE);
         return {
           outcome: 'updated',
           mode: 'live',
           matchedId: a.RECORDID,
           sourceNativeStatus: native,
           officialStatus: normalizeOfficialStatus(native),
+          sourceEventAt,
+          publicationAt: null,
+          observedAt: checkedAt,
           fields: {
             permitType: a.APPTYPEALIAS || undefined,
             submittedDate: epochMsToDate(a.SUBMITTED_DATE),
@@ -69,6 +77,8 @@ export async function checkFairfaxPermit({ officialId }) {
             approvedDate: epochMsToDate(a.APPROVED_DATE),
             issuedDate: epochMsToDate(a.ISSUED_DATE),
             closedDate: epochMsToDate(a.CLOSED_DATE),
+            sourceEventDate: sourceEventAt,
+            publicationDate: null,
             sourceUrl: a.LINK_URL || undefined,
             address: a.ADDRESS_1 || undefined,
             city: a.CITY || undefined,

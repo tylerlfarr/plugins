@@ -1,18 +1,30 @@
 /**
  * Reusable ArcGIS FeatureServer / MapServer discovery + inspection.
  * Read-only. Does not auto-activate sources for operational records.
+ * Outbound fetches go through SSRF hardening (private/link-local blocked).
  */
+import { assertSafeOutboundUrl } from './ssrf.js';
 
 const UA = 'permit-ledger-discovery/1.0 (+local prototype; read-only)';
 
 async function fetchJson(url, { timeoutMs = 15000 } = {}) {
+  await assertSafeOutboundUrl(url);
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), timeoutMs);
   try {
     const res = await fetch(url, {
       signal: ctrl.signal,
       headers: { Accept: 'application/json', 'User-Agent': UA },
+      redirect: 'manual',
     });
+    if (res.status >= 300 && res.status < 400) {
+      return {
+        ok: false,
+        status: res.status,
+        json: null,
+        text: 'Redirects are not followed for source inspection (SSRF hardening)',
+      };
+    }
     const text = await res.text();
     let json = null;
     try {
@@ -63,6 +75,16 @@ export async function inspectArcGisUrl(rawUrl, { sampleKnownIds = [] } = {}) {
   const url = String(rawUrl || '').trim();
   if (!url) return { state: 'needs_review', error: 'URL required' };
   if (!/^https?:\/\//i.test(url)) return { state: 'needs_review', error: 'URL must be http(s)' };
+  try {
+    await assertSafeOutboundUrl(url);
+  } catch (err) {
+    return {
+      state: 'unsupported',
+      error: err.message || 'URL blocked by SSRF policy',
+      code: err.code || 'ssrf_blocked',
+      endpoint: url,
+    };
+  }
 
   const serviceUrl = url.replace(/\/(FeatureServer|MapServer)\/\d+\/?$/i, (_, m) => `/${m}`);
   const layerMatch = url.match(/\/(FeatureServer|MapServer)\/(\d+)\/?$/i);

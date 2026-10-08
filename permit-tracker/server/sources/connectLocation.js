@@ -179,6 +179,10 @@ function summarize(s) {
     coverage_limitations: s.coverage_limitations,
     auth_access: s.auth_access,
     reusable: Boolean(s.reusable),
+    capabilities: s.capabilities || null,
+    adapter_operational: Boolean(s.adapter_operational),
+    activatable: Boolean(s.activatable),
+    activation_blocker: s.activation_blocker || null,
   };
 }
 

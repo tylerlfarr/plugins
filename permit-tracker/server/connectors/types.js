@@ -1,8 +1,20 @@
+/**
+ * Stable jurisdiction identifiers (snake_case codes).
+ * mode=live only when an operational adapter can refresh import records.
+ * Unsupported jurisdictions must stay honest — never fabricate live outcomes.
+ */
 export const JURISDICTIONS = {
   fairfax_county: {
     code: 'fairfax_county',
     label: 'Fairfax County, VA',
     mode: 'live',
+    capabilities: {
+      applications: false,
+      issued: true,
+      active_status: true,
+      pending: false,
+      inspections: false,
+    },
     notes:
       'Live Building Records PLUS FeatureServer. Issued-heavy; no pending/comments/holds/inspections fields.',
   },
@@ -10,44 +22,107 @@ export const JURISDICTIONS = {
     code: 'loudoun_county',
     label: 'Loudoun County, VA',
     mode: 'unsupported',
+    capabilities: {
+      applications: false,
+      issued: false,
+      active_status: false,
+      pending: false,
+      inspections: false,
+    },
     notes:
-      'LandMARC portal + annual issued-permit apps exist; no verified per-permit status API. Checks return unavailable (fixtures only in demo mode).',
+      'UNSUPPORTED for operational sync: LandMARC HTML + issued-only GIS (wrong ID scheme for BLDC-2026-*). Checks return unavailable — not fabricated.',
   },
   prince_william_county: {
     code: 'prince_william_county',
     label: 'Prince William County, VA',
     mode: 'unsupported',
+    capabilities: {
+      applications: false,
+      issued: false,
+      active_status: false,
+      pending: false,
+      inspections: false,
+    },
     notes:
-      'ePortal HTML search exists; no verified public FeatureServer for BLD/ZNA/MST sync. Checks return unavailable.',
+      'UNSUPPORTED for workbook BLD/ZNA sync: ePortal HTML; GIS Use Permits are PLN* zoning only. Checks return unavailable.',
+  },
+  west_virginia: {
+    code: 'west_virginia',
+    label: 'West Virginia (state / local AHJs)',
+    mode: 'unsupported',
+    capabilities: {
+      applications: false,
+      issued: false,
+      active_status: false,
+      pending: false,
+      inspections: false,
+    },
+    notes:
+      'UNSUPPORTED: no verified statewide or pilot-county per-permit connector in this build. Inventory only — do not show as verified.',
   },
   city_of_fairfax: {
     code: 'city_of_fairfax',
     label: 'City of Fairfax, VA',
     mode: 'unsupported',
-    notes: 'Distinct from Fairfax County. Accela portal only.',
+    capabilities: {
+      applications: false,
+      issued: false,
+      active_status: false,
+      pending: false,
+      inspections: false,
+    },
+    notes: 'Distinct from Fairfax County. Accela portal only — unsupported here.',
   },
   city_of_houston: {
     code: 'city_of_houston',
     label: 'City of Houston, TX',
     mode: 'unsupported',
+    capabilities: {
+      applications: false,
+      issued: false,
+      active_status: false,
+      pending: false,
+      inspections: false,
+    },
     notes: 'Not in source workbook. Per-permit API not verified.',
   },
   harris_county: {
     code: 'harris_county',
     label: 'Harris County, TX',
     mode: 'unsupported',
+    capabilities: {
+      applications: false,
+      issued: false,
+      active_status: false,
+      pending: false,
+      inspections: false,
+    },
     notes: 'Distinct from City of Houston. Unsupported.',
   },
   unresolved: {
     code: 'unresolved',
     label: 'Unresolved jurisdiction',
     mode: 'unsupported',
+    capabilities: {
+      applications: false,
+      issued: false,
+      active_status: false,
+      pending: false,
+      inspections: false,
+    },
     notes: 'Needs confirmed mapping; ID heuristics alone are insufficient.',
   },
   other: {
     code: 'other',
     label: 'Other',
     mode: 'unsupported',
+    capabilities: {
+      applications: false,
+      issued: false,
+      active_status: false,
+      pending: false,
+      inspections: false,
+    },
     notes: 'Out-of-scope jurisdictions.',
   },
 };

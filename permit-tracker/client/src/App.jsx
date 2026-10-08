@@ -1030,17 +1030,49 @@ export default function App() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ fairfaxOnly: true }),
       });
-      const total = data.counts?.total ?? data.results?.length ?? 0;
+      let counts = data.counts;
+      let diagnostic = data.diagnostic;
+      if (data.async && data.job?.id) {
+        setMessage(
+          `Fairfax sync job #${data.job.id} queued on the server` +
+            (data.coalesced ? ' (joined existing job)' : '') +
+            ' — closing this tab will not cancel it…'
+        );
+        const deadline = Date.now() + 180000;
+        let finished = null;
+        while (Date.now() < deadline) {
+          // eslint-disable-next-line no-await-in-loop
+          await new Promise((r) => setTimeout(r, 800));
+          // eslint-disable-next-line no-await-in-loop
+          const poll = await api(`/api/sync/jobs/${data.job.id}`);
+          finished = poll.job;
+          if (finished?.status === 'succeeded' || finished?.status === 'failed') break;
+        }
+        if (!finished || (finished.status !== 'succeeded' && finished.status !== 'failed')) {
+          setMessage(
+            `Fairfax sync job #${data.job.id} still running on the server. Check Sources / Attention later — work continues after browser close.`
+          );
+          return;
+        }
+        if (finished.status === 'failed') {
+          setMessage(`Fairfax sync job #${finished.id} failed: ${finished.error || 'unknown'}`);
+          return;
+        }
+        let summary = pollSummary(finished);
+        counts = summary.counts;
+        diagnostic = summary.diagnostic;
+      }
+      const total = counts?.total ?? data.results?.length ?? 0;
       if (total === 0) {
         setMessage(
-          data.diagnostic ||
+          diagnostic ||
             'Fairfax sync finished: 0 checks. Import a workbook with Fairfax County official IDs first — this button re-checks saved IDs; it does not discover new permits in the county GIS.'
         );
       } else {
         setMessage(
           `Fairfax sync finished: ${total} checks` +
-            (data.counts
-              ? ` (updated ${data.counts.updated}, no_change ${data.counts.no_change}, not_found ${data.counts.not_found}, blocked ${data.counts.blocked || 0}, unsupported ${data.counts.unsupported || 0}, unavailable ${data.counts.unavailable}, failed ${data.counts.failed})`
+            (counts
+              ? ` (updated ${counts.updated}, no_change ${counts.no_change}, not_found ${counts.not_found}, blocked ${counts.blocked || 0}, unsupported ${counts.unsupported || 0}, unavailable ${counts.unavailable}, failed ${counts.failed})`
               : '')
         );
       }
@@ -1051,6 +1083,14 @@ export default function App() {
       }
     } finally {
       setBusy(false);
+    }
+  }
+
+  function pollSummary(job) {
+    try {
+      return JSON.parse(job?.summary_json || '{}');
+    } catch {
+      return {};
     }
   }
 
@@ -2487,6 +2527,34 @@ export default function App() {
                       </li>
                     ))}
                   </ul>
+                  <h3>Official evidence timestamps</h3>
+                  <p className="muted">
+                    Source event date is from the jurisdiction payload. Observed / last successful check
+                    are when this app saw the record — not interchangeable.
+                  </p>
+                  <ul className="history">
+                    <li>
+                      Source event:{' '}
+                      <span className="mono">{detail.source_event_at || '—'}</span>
+                    </li>
+                    <li>
+                      Publication:{' '}
+                      <span className="mono">{detail.source_publication_at || 'unavailable / —'}</span>
+                    </li>
+                    <li>
+                      Observed:{' '}
+                      <span className="mono">
+                        {detail.source_observed_at || detail.last_checked_at || '—'}
+                      </span>
+                    </li>
+                    <li>
+                      Last successful check:{' '}
+                      <span className="mono">{detail.last_successful_check_at || '—'}</span>
+                      {detail.last_check_outcome ? (
+                        <span className="muted"> · {detail.last_check_outcome}</span>
+                      ) : null}
+                    </li>
+                  </ul>
                   <div className="toolbar">
                     <button type="button" className="btn primary" disabled={busy} onClick={saveDetail}>
                       Save
@@ -3064,18 +3132,36 @@ export default function App() {
           ) : null}
 
           <h2>Source registry</h2>
-          <p className="muted">Verified vs speculative kept separate. ArcGIS ≠ automatically supported.</p>
+          <p className="muted">
+            Verified vs speculative kept separate. Activation requires an executable adapter + config —
+            adapter_type strings alone are not enough. ArcGIS ≠ automatically supported.
+          </p>
           {sources.map((s) => (
             <div key={s.key} className="attention-item">
               <div>
                 <strong>{s.key}</strong>{' '}
                 <span className={`pill ${s.state === 'verified' ? 'live' : 'warn'}`}>{s.state}</span>
                 {s.activated ? <span className="pill live">activated</span> : null}
+                {s.adapter_operational ? (
+                  <span className="pill live">ops adapter</span>
+                ) : (
+                  <span className="pill warn">no ops adapter</span>
+                )}
               </div>
               <div className="mono">
                 {s.jurisdiction_code} · {s.platform} · {s.adapter_type}
               </div>
               <div>{s.coverage_limitations}</div>
+              {s.capabilities ? (
+                <div className="muted">
+                  Caps: applications={String(s.capabilities.applications)} · issued=
+                  {String(s.capabilities.issued)} · fetch={String(s.capabilities.fetch)} · refresh=
+                  {String(s.capabilities.refresh)}
+                </div>
+              ) : null}
+              {!s.activatable && s.activation_blocker ? (
+                <div className="muted">Activation blocked: {s.activation_blocker}</div>
+              ) : null}
               <div className="muted mono">{s.endpoint}</div>
             </div>
           ))}
@@ -3111,6 +3197,10 @@ export default function App() {
       {tab === 'connectors' && (
         <div className="panel stack">
           <h2>Connectors & Fairfax field availability</h2>
+          <p className="muted">
+            Stable jurisdiction codes. Unsupported markets (Loudoun, PWC, West Virginia, City of Fairfax)
+            stay labeled unsupported — checks return unavailable, never fabricated live results.
+          </p>
           {connectors.map((c) => (
             <div key={c.code} className="attention-item">
               <div>
@@ -3119,6 +3209,15 @@ export default function App() {
               </div>
               <div className="mono">{c.code}</div>
               <div>{c.notes}</div>
+              {c.capabilities ? (
+                <div className="muted">
+                  applications={String(c.capabilities.applications)} · issued=
+                  {String(c.capabilities.issued)} · active_status=
+                  {String(c.capabilities.active_status)} · pending=
+                  {String(c.capabilities.pending)}
+                </div>
+              ) : null}
+              <div className="muted">{c.honestLabel}</div>
             </div>
           ))}
           <h3>Fairfax Building Records PLUS fields</h3>
