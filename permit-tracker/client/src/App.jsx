@@ -241,6 +241,14 @@ export default function App() {
     'unknown_party',
   ];
   const [oppLinkPermitId, setOppLinkPermitId] = useState('');
+  const [assistantQuery, setAssistantQuery] = useState('');
+  const [assistantResult, setAssistantResult] = useState(null);
+  const [assistantStatus, setAssistantStatus] = useState(null);
+  const [evidenceSummary, setEvidenceSummary] = useState(null);
+  const [projectHandoffPreview, setProjectHandoffPreview] = useState(null);
+  const [oppCoordHandoffPreview, setOppCoordHandoffPreview] = useState(null);
+  const [sourceProposals, setSourceProposals] = useState([]);
+  const [handoffIncludeSensitive, setHandoffIncludeSensitive] = useState(false);
 
   const connectors = meta.connectors || [];
   const isOwner = Boolean(
@@ -559,6 +567,135 @@ export default function App() {
     } finally {
       setBusy(false);
     }
+  }
+
+  async function runAssistantQuery() {
+    const text = assistantQuery.trim();
+    if (!text) {
+      setMessage('Enter a filter or summary request for the assistant.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const out = await api('/api/assistant', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          query: text,
+          permitId: detail?.id || null,
+          intent: 'auto',
+        }),
+      });
+      setAssistantResult(out);
+      setAssistantStatus(out.ai || null);
+      if (out.filterMapping && !out.filterMapping.abstain) {
+        const fm = out.filterMapping;
+        setQ(fm.q || '');
+        setFilters({ ...fm.filters });
+        setMessage(
+          `Assistant filters applied (${out.ai?.state || 'unavailable'}): ${
+            Object.keys(fm.filters || {}).join(', ') || (fm.q ? 'q' : 'none')
+          }`
+        );
+      } else if (out.filterMapping?.abstain) {
+        setMessage(
+          `Assistant abstained: ${out.filterMapping.reviewTask || out.message || 'review required'}`
+        );
+      } else if (out.evidence) {
+        setEvidenceSummary(out.evidence);
+        setMessage(
+          out.evidence.unknown
+            ? 'Evidence summary: Unknown — review task (no invented facts)'
+            : 'Evidence summary ready'
+        );
+      } else {
+        setMessage(out.message || 'Assistant response');
+      }
+    } catch (err) {
+      setMessage(String(err.message || err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function summarizeSelectedEvidence() {
+    if (!detail?.id) {
+      setMessage('Open a permit to summarize evidence.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const out = await api('/api/assistant/summarize', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ permitId: detail.id }),
+      });
+      setEvidenceSummary(out);
+      setMessage(
+        out.unknown
+          ? 'Evidence incomplete/conflicting — Unknown + review task (no invented facts)'
+          : 'Evidence summary from retrieved records only'
+      );
+    } catch (err) {
+      setMessage(String(err.message || err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function previewProjectHandoff() {
+    setBusy(true);
+    try {
+      const out = await api('/api/handoffs/project/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filters: { q, ...filters },
+          selectedIds: selectedIds.length ? selectedIds : null,
+          includeSensitive: handoffIncludeSensitive,
+        }),
+      });
+      setProjectHandoffPreview(out);
+      setMessage(
+        `Project handoff preview: ${out.counts?.total ?? 0} rows · blocked ${
+          out.counts?.blocked ?? 0
+        } · sensitive ${out.includeSensitive ? 'on' : 'off'}`
+      );
+    } catch (err) {
+      setMessage(String(err.message || err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function previewOppCoordHandoff() {
+    setBusy(true);
+    try {
+      const out = await api('/api/handoffs/opportunity/preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ids: oppSelectedIds.size ? [...oppSelectedIds] : null,
+          includeSensitive: handoffIncludeSensitive,
+        }),
+      });
+      setOppCoordHandoffPreview(out);
+      setMessage(
+        `Opportunity handoff preview: ${out.counts?.total ?? 0} · qualified ${
+          out.counts?.qualified ?? 0
+        } · sensitive ${out.includeSensitive ? 'on' : 'off'}`
+      );
+    } catch (err) {
+      setMessage(String(err.message || err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function refreshSourceProposals() {
+    if (!isOwner) return;
+    const out = await api('/api/assistant/source-proposals');
+    setSourceProposals(out.proposals || []);
   }
 
   async function previewOppContactHandoff() {
@@ -1814,6 +1951,152 @@ export default function App() {
 
       {tab === 'permits' && (
         <>
+          <div className="panel stack" data-testid="assistant-panel" style={{ marginBottom: 12 }}>
+            <h3>Assistant (optional)</h3>
+            <p className="muted">
+              Natural language → supported filters, or evidence summaries from retrieved records
+              only. AI is optional — when unavailable, deterministic helpers still work. Never
+              invents IDs/dates/contacts; never lending approval.
+            </p>
+            <div className="banner" data-testid="assistant-ai-state">
+              AI state:{' '}
+              <strong>
+                {(assistantStatus || meta.assistant?.ai || assistantResult?.ai)?.state ||
+                  'unavailable'}
+              </strong>
+              {' — '}
+              {(assistantStatus || meta.assistant?.ai || assistantResult?.ai)?.reason ||
+                'No model required for filter helpers'}
+            </div>
+            <div className="toolbar">
+              <input
+                type="search"
+                data-testid="assistant-query"
+                placeholder='e.g. “blocked Fairfax lots approaching start” or “why is this blocked”'
+                value={assistantQuery}
+                onChange={(e) => setAssistantQuery(e.target.value)}
+                style={{ minWidth: 280, flex: 1 }}
+              />
+              <button
+                type="button"
+                className="btn primary"
+                disabled={busy}
+                data-testid="assistant-run"
+                onClick={runAssistantQuery}
+              >
+                Apply / ask
+              </button>
+              <button
+                type="button"
+                className="btn"
+                disabled={busy || !detail?.id}
+                data-testid="assistant-summarize"
+                onClick={summarizeSelectedEvidence}
+              >
+                What changed / why blocked
+              </button>
+            </div>
+            {assistantResult?.filterMapping ? (
+              <div className="attention-item" data-testid="assistant-filter-result">
+                <div>
+                  Filters:{' '}
+                  <span className="mono">
+                    {JSON.stringify({
+                      q: assistantResult.filterMapping.q,
+                      ...assistantResult.filterMapping.filters,
+                    })}
+                  </span>
+                </div>
+                {(assistantResult.filterMapping.notes || []).map((n) => (
+                  <div key={n} className="muted">
+                    {n}
+                  </div>
+                ))}
+                {(assistantResult.filterMapping.unsupportedGeography || []).length ? (
+                  <div className="banner warn">
+                    Unsupported geography:{' '}
+                    {assistantResult.filterMapping.unsupportedGeography
+                      .map((g) => g.label)
+                      .join(', ')}
+                  </div>
+                ) : null}
+                {assistantResult.filterMapping.reviewTask ? (
+                  <div className="banner warn">Review: {assistantResult.filterMapping.reviewTask}</div>
+                ) : null}
+                {assistantResult.filterMapping.filterLinks?.applyQuery ? (
+                  <div className="muted">
+                    Filter link:{' '}
+                    <span className="mono">?{assistantResult.filterMapping.filterLinks.applyQuery}</span>
+                  </div>
+                ) : null}
+              </div>
+            ) : null}
+            {evidenceSummary?.summary ? (
+              <div className="attention-item" data-testid="assistant-evidence">
+                <strong>Evidence summary</strong>
+                <ul className="history">
+                  {(evidenceSummary.summary.bullets || []).map((b) => (
+                    <li key={b}>{b}</li>
+                  ))}
+                </ul>
+                {evidenceSummary.reviewTask ? (
+                  <div className="banner warn">{evidenceSummary.reviewTask}</div>
+                ) : null}
+                <div className="muted">{evidenceSummary.disclaimer}</div>
+              </div>
+            ) : null}
+            <div className="toolbar">
+              <label className="muted">
+                <input
+                  type="checkbox"
+                  checked={handoffIncludeSensitive}
+                  onChange={(e) => setHandoffIncludeSensitive(e.target.checked)}
+                />{' '}
+                Include sensitive columns in handoff (off by default)
+              </label>
+              <button
+                type="button"
+                className="btn"
+                disabled={busy}
+                data-testid="project-handoff-preview"
+                onClick={previewProjectHandoff}
+              >
+                Preview project handoff
+              </button>
+              <a
+                className="btn"
+                data-testid="project-handoff-export"
+                href={`/api/handoffs/project.xlsx?${new URLSearchParams({
+                  ...Object.fromEntries(
+                    Object.entries({ q, ...filters }).filter(
+                      ([, v]) => v != null && String(v) !== ''
+                    )
+                  ),
+                  ...(selectedIds.length ? { selectedIds: selectedIds.join(',') } : {}),
+                  ...(handoffIncludeSensitive ? { includeSensitive: '1' } : {}),
+                })}`}
+              >
+                Export project handoff
+              </a>
+            </div>
+            {projectHandoffPreview ? (
+              <div className="attention-item" data-testid="project-handoff-result">
+                Counts: total {projectHandoffPreview.counts?.total} · blocked{' '}
+                {projectHandoffPreview.counts?.blocked} · with due{' '}
+                {projectHandoffPreview.counts?.withDue} · sensitive omitted:{' '}
+                {(projectHandoffPreview.sensitiveColumnsOmitted || []).join(', ') || 'none'}
+                <ul className="history">
+                  {(projectHandoffPreview.preview || []).slice(0, 5).map((r) => (
+                    <li key={r.permit_record_id}>
+                      {r.community_name} lot {r.lot_label} · {r.readiness_state} · owner{' '}
+                      {r.owner || '—'} · {r.next_action || '—'}{' '}
+                      {r.next_action_due ? `due ${r.next_action_due}` : ''}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            ) : null}
+          </div>
           <div className="toolbar">
             <input
               type="search"
@@ -3258,7 +3541,46 @@ export default function App() {
                 Export pipeline
               </a>
             )}
+            <button
+              type="button"
+              className="btn"
+              disabled={busy}
+              data-testid="opp-coord-handoff-preview"
+              onClick={previewOppCoordHandoff}
+            >
+              Preview opportunity handoff
+            </button>
+            <a
+              className="btn"
+              data-testid="opp-coord-handoff-export"
+              href={`/api/handoffs/opportunity.xlsx?${new URLSearchParams({
+                ...(oppSelectedIds.size
+                  ? { selectedIds: [...oppSelectedIds].join(',') }
+                  : {}),
+                ...(handoffIncludeSensitive ? { includeSensitive: '1' } : {}),
+              })}`}
+            >
+              Export opportunity handoff
+            </a>
           </div>
+          {oppCoordHandoffPreview ? (
+            <div className="attention-item" data-testid="opp-coord-handoff-result">
+              Opportunity handoff counts: total {oppCoordHandoffPreview.counts?.total} · qualified{' '}
+              {oppCoordHandoffPreview.counts?.qualified} · follow-up{' '}
+              {oppCoordHandoffPreview.counts?.followUp} · contact review{' '}
+              {oppCoordHandoffPreview.counts?.needsContactReview} · sensitive omitted:{' '}
+              {(oppCoordHandoffPreview.sensitiveColumnsOmitted || []).join(', ') || 'none'}
+              <ul className="history">
+                {(oppCoordHandoffPreview.preview || []).slice(0, 5).map((r) => (
+                  <li key={r.opportunity_id}>
+                    {r.official_id} · {r.disposition} · role {r.role_evidence} · freshness{' '}
+                    {r.source_freshness || 'unknown'} · {r.permitted_scope?.slice(0, 80)}…
+                  </li>
+                ))}
+              </ul>
+              <div className="muted">{oppCoordHandoffPreview.note}</div>
+            </div>
+          ) : null}
 
           <div className="layout">
             <div className="table-wrap">
@@ -4009,6 +4331,116 @@ export default function App() {
         <div className="panel stack">
           {isOwner ? (
             <>
+              <h2>Source discovery proposals (owner)</h2>
+              <p className="muted">
+                Cheap catalog proposals only — never auto-activate. Human approval required; use
+                Activate on a verified/reviewed source separately. Broad API hunter deferred.
+              </p>
+              <div className="toolbar">
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={busy}
+                  data-testid="source-proposals-run"
+                  onClick={async () => {
+                    setBusy(true);
+                    try {
+                      const out = await api('/api/assistant/source-proposals', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({}),
+                      });
+                      setSourceProposals(out.proposals || []);
+                      setMessage(
+                        `Proposed ${out.count || 0} source(s) — proposal-only (${out.ai?.state || 'unavailable'})`
+                      );
+                    } catch (e) {
+                      setMessage(String(e.message || e));
+                    } finally {
+                      setBusy(false);
+                    }
+                  }}
+                >
+                  Propose catalog sources
+                </button>
+                <button
+                  type="button"
+                  className="btn"
+                  disabled={busy}
+                  onClick={() =>
+                    refreshSourceProposals()
+                      .then(() => setMessage('Source proposals refreshed'))
+                      .catch((e) => setMessage(String(e.message || e)))
+                  }
+                >
+                  Refresh proposals
+                </button>
+              </div>
+              {sourceProposals.length ? (
+                <ul className="history" data-testid="source-proposals-list">
+                  {sourceProposals.map((p) => (
+                    <li key={p.id}>
+                      <strong>{p.label}</strong> · {p.jurisdiction_code} · {p.status}
+                      <div className="muted mono">{p.endpoint}</div>
+                      <div className="muted">{p.rationale}</div>
+                      {p.status === 'proposed' ? (
+                        <div className="empty-actions" style={{ marginTop: 6 }}>
+                          <button
+                            type="button"
+                            className="btn"
+                            disabled={busy}
+                            onClick={async () => {
+                              setBusy(true);
+                              try {
+                                await api(`/api/assistant/source-proposals/${p.id}/ack`, {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ decision: 'approved_for_review' }),
+                                });
+                                await refreshSourceProposals();
+                                setMessage(
+                                  'Marked approved_for_review — still not activated. Use Sources activate after human review.'
+                                );
+                              } catch (e) {
+                                setMessage(String(e.message || e));
+                              } finally {
+                                setBusy(false);
+                              }
+                            }}
+                          >
+                            Approve for review
+                          </button>
+                          <button
+                            type="button"
+                            className="btn"
+                            disabled={busy}
+                            onClick={async () => {
+                              setBusy(true);
+                              try {
+                                await api(`/api/assistant/source-proposals/${p.id}/ack`, {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ decision: 'rejected' }),
+                                });
+                                await refreshSourceProposals();
+                                setMessage('Proposal rejected');
+                              } catch (e) {
+                                setMessage(String(e.message || e));
+                              } finally {
+                                setBusy(false);
+                              }
+                            }}
+                          >
+                            Reject
+                          </button>
+                        </div>
+                      ) : null}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="muted">No open proposals.</p>
+              )}
               <h2>Create trial user</h2>
               <p className="muted">
                 Owner-only. Enter login + password privately — no email invitation. Creates an{' '}

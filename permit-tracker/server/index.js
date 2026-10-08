@@ -124,6 +124,23 @@ import {
   ROLE_NON_EQUIVALENCE_NOTE,
 } from './contactHandoff.js';
 import {
+  ensureAssistantTables,
+  runAssistant,
+  mapNaturalLanguageToFilters,
+  summarizePermitEvidence,
+  proposeSourceDiscoveries,
+  listSourceDiscoveryProposals,
+  acknowledgeSourceProposal,
+  phase7AssistantStatus,
+  getAiAvailability,
+} from './assistant.js';
+import {
+  buildProjectHandoffRows,
+  exportProjectHandoffXlsx,
+  buildOpportunityHandoffRows,
+  exportOpportunityHandoffXlsx,
+} from './handoffs.js';
+import {
   USE_CLASSES,
   USE_CLASS_LABELS,
   USE_SOURCES,
@@ -490,6 +507,7 @@ app.get('/api/meta', requireAuth, (req, res) => {
     tracerfy: tracerfyConfig(),
     tracerfySetupNote:
       'Connect Tracerfy to enable live lookups: set TRACERFY_API_TOKEN, tracerfy_spend_limit_credits, tracerfy_commercial_confirmed=1, and tracerfy_production_enabled=1 in the host environment/secrets (see docs/deploy.md). Never paste tokens in chat.',
+    assistant: phase7AssistantStatus(),
   });
 });
 
@@ -1103,6 +1121,7 @@ app.get('/api/connectors', (_req, res) => {
 
 // --- Phase 5 Opportunities (private pipeline; workbook-free discovery) ---
 ensureOpportunityTables();
+ensureAssistantTables();
 
 app.get('/api/opportunities/coverage', (_req, res) => {
   res.json(getDiscoveryCoverage());
@@ -2092,6 +2111,147 @@ app.post('/api/opportunities/contact-handoff', requireAuth, async (req, res) => 
   } catch (e) {
     res.status(400).json({ error: String(e.message || e) });
   }
+});
+
+/* ── Phase 7: bounded assistant + coordinated handoffs ── */
+app.get('/api/assistant/status', requireAuth, (_req, res) => {
+  res.json(phase7AssistantStatus());
+});
+
+app.post('/api/assistant', requireAuth, (req, res) => {
+  try {
+    const body = req.body || {};
+    const intent = body.intent || 'auto';
+    if (intent === 'propose_source_discovery') {
+      // Owner-only for source proposals
+      if (authEnabled() && req.user?.role !== 'owner') {
+        return res.status(403).json({ error: 'owner_required', detail: 'Source proposals are owner-only' });
+      }
+    }
+    const out = runAssistant({
+      query: body.query || body.q || '',
+      permitId: body.permitId || body.permit_id || null,
+      intent,
+      actor: currentUser(),
+    });
+    res.json(out);
+  } catch (e) {
+    res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
+app.post('/api/assistant/filters', requireAuth, (req, res) => {
+  const mapping = mapNaturalLanguageToFilters(req.body?.query || req.body?.q || '');
+  res.json({ ...mapping, ai: getAiAvailability() });
+});
+
+app.post('/api/assistant/summarize', requireAuth, (req, res) => {
+  const permitId = req.body?.permitId || req.body?.permit_id;
+  if (!permitId) return res.status(400).json({ error: 'permitId required' });
+  res.json(summarizePermitEvidence(permitId, { actor: currentUser() }));
+});
+
+app.get('/api/assistant/source-proposals', requireAuth, requireOwner, (req, res) => {
+  res.json({
+    proposals: listSourceDiscoveryProposals({ status: req.query.status || 'proposed' }),
+    ai: getAiAvailability(),
+  });
+});
+
+app.post('/api/assistant/source-proposals', requireAuth, requireOwner, (req, res) => {
+  const out = proposeSourceDiscoveries({
+    actor: currentUser(),
+    jurisdictionHint: req.body?.jurisdiction || req.body?.query || '',
+  });
+  res.json(out);
+});
+
+app.post('/api/assistant/source-proposals/:id/ack', requireAuth, requireOwner, (req, res) => {
+  try {
+    const row = acknowledgeSourceProposal(req.params.id, {
+      actor: currentUser(),
+      decision: req.body?.decision || 'rejected',
+      note: req.body?.note || '',
+    });
+    res.json({
+      proposal: row,
+      note: 'Acknowledgement recorded. Activation remains a separate owner action on Sources — this endpoint never activates.',
+    });
+  } catch (e) {
+    res.status(e.code === 'not_found' ? 404 : 400).json({ error: String(e.message || e) });
+  }
+});
+
+app.post('/api/handoffs/project/preview', requireAuth, (req, res) => {
+  const body = req.body || {};
+  const filters = normalizePermitFilters(body.filters || body);
+  const selectedIds = body.selectedIds || body.selected_ids || null;
+  const includeSensitive = body.includeSensitive === true || body.include_sensitive === true;
+  res.json(
+    buildProjectHandoffRows({
+      filters: { ...filters, q: body.q || filters.q },
+      selectedIds,
+      includeSensitive,
+      limit: body.limit,
+    })
+  );
+});
+
+app.get('/api/handoffs/project.xlsx', requireAuth, (req, res) => {
+  const filters = normalizePermitFilters(req.query);
+  let selectedIds = null;
+  if (req.query.selectedIds != null && String(req.query.selectedIds).trim() !== '') {
+    selectedIds = String(req.query.selectedIds)
+      .split(',')
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isFinite(n));
+  }
+  const includeSensitive =
+    req.query.includeSensitive === '1' || req.query.includeSensitive === 'true';
+  const { buffer, meta } = exportProjectHandoffXlsx({
+    filters,
+    selectedIds,
+    includeSensitive,
+  });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', 'attachment; filename="permit-ledger-project-handoff.xlsx"');
+  res.setHeader('X-Handoff-Count', String(meta.count));
+  res.setHeader('X-Handoff-Sensitive', includeSensitive ? '1' : '0');
+  res.send(Buffer.from(buffer));
+});
+
+app.post('/api/handoffs/opportunity/preview', requireAuth, (req, res) => {
+  const body = req.body || {};
+  const ids = body.ids || body.selectedIds || body.opportunityIds || null;
+  const includeSensitive = body.includeSensitive === true || body.include_sensitive === true;
+  res.json(
+    buildOpportunityHandoffRows({
+      ids: ids?.length ? ids.map(Number) : null,
+      includeSensitive,
+      limit: body.limit,
+    })
+  );
+});
+
+app.get('/api/handoffs/opportunity.xlsx', requireAuth, (req, res) => {
+  let ids = null;
+  if (req.query.selectedIds != null && String(req.query.selectedIds).trim() !== '') {
+    ids = String(req.query.selectedIds)
+      .split(',')
+      .map((s) => Number(s.trim()))
+      .filter((n) => Number.isFinite(n));
+  }
+  const includeSensitive =
+    req.query.includeSensitive === '1' || req.query.includeSensitive === 'true';
+  const { buffer, meta } = exportOpportunityHandoffXlsx({ ids, includeSensitive });
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader(
+    'Content-Disposition',
+    'attachment; filename="permit-ledger-opportunity-handoff.xlsx"'
+  );
+  res.setHeader('X-Handoff-Count', String(meta.count));
+  res.setHeader('X-Handoff-Sensitive', includeSensitive ? '1' : '0');
+  res.send(Buffer.from(buffer));
 });
 
 app.post('/api/contacts/provider-mode', requireAuth, requireOwner, (req, res) => {
