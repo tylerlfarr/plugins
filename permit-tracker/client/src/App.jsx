@@ -225,6 +225,21 @@ export default function App() {
   const [oppSearches, setOppSearches] = useState([]);
   const [oppGroups, setOppGroups] = useState([]);
   const [oppDetail, setOppDetail] = useState(null);
+  const [soughtRole, setSoughtRole] = useState('');
+  const [contactCostPreview, setContactCostPreview] = useState(null);
+  const [oppSoughtRole, setOppSoughtRole] = useState('');
+  const [oppHandoffPreview, setOppHandoffPreview] = useState(null);
+  const [oppContactResults, setOppContactResults] = useState(null);
+  const SOUGHT_ROLE_OPTIONS = [
+    'property_owner',
+    'owner_company',
+    'applicant',
+    'contractor',
+    'developer',
+    'architect_engineer',
+    'agency_contact',
+    'unknown_party',
+  ];
   const [oppLinkPermitId, setOppLinkPermitId] = useState('');
 
   const connectors = meta.connectors || [];
@@ -452,6 +467,39 @@ export default function App() {
     return null;
   }
 
+  async function previewFindContacts() {
+    if (!detail) return;
+    const prop = selectedProperty();
+    if (!prop) {
+      setMessage('Select/confirm the property that will be searched first.');
+      return;
+    }
+    if (!soughtRole) {
+      setMessage('Choose which role is sought first (owner ≠ applicant ≠ contractor ≠ borrower).');
+      return;
+    }
+    setBusy(true);
+    try {
+      const preview = await api('/api/contacts/cost-preview', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          propertyIds: [prop.id],
+          sought_role: soughtRole,
+          endpoint: 'instant_trace',
+        }),
+      });
+      setContactCostPreview(preview);
+      setMessage(
+        `Cost preview: ${preview.deduplicatedTargetCount} target(s) · max ${preview.maxEstimatedCredits} credits ($${preview.maxEstimatedUsd}) · mode ${preview.providerMode} · budget ${preview.availableBudgetCredits} · live ${preview.liveEnrichmentStatus}`
+      );
+    } catch (e) {
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function findContacts() {
     if (!detail) return;
     const prop = selectedProperty();
@@ -459,8 +507,16 @@ export default function App() {
       setMessage('Select/confirm the property that will be searched first.');
       return;
     }
-    if (prop.link_state !== 'confirmed') {
+    if (prop.link_state !== 'confirmed' && prop.record_origin !== 'sandbox_demo') {
       setMessage(`Confirm property before Find contacts (current link: ${prop.link_state}).`);
+      return;
+    }
+    if (!soughtRole) {
+      setMessage('Choose which role is sought before Find contacts.');
+      return;
+    }
+    if (!contactCostPreview) {
+      setMessage('Run cost preview first — shows deduped count, max cost, mode, and budget.');
       return;
     }
     setBusy(true);
@@ -472,6 +528,7 @@ export default function App() {
           property_id: prop.id,
           permit_record_id: detail.id,
           endpoint: 'instant_trace',
+          sought_role: soughtRole,
         }),
       });
       const addr = result.searchedAddress
@@ -487,15 +544,109 @@ export default function App() {
         );
       } else if (result.deduped) {
         setMessage(
-          `Find contacts: reused prior job #${result.job?.id} (${result.contacts?.length || 0} candidates). Searched ${addr}.`
+          `Find contacts: reused prior job #${result.job?.id} (${result.contacts?.length || 0} candidates). Sought ${soughtRole}. Searched ${addr}.`
         );
       } else {
         setMessage(
-          `Find contacts: ${result.saved?.length || 0} candidates · mode ${result.provider?.mode} · est ${result.estimatedCredits ?? '—'} credits. Searched ${addr}.`
+          `Find contacts: ${result.saved?.length || 0} candidates · sought ${soughtRole} · mode ${result.provider?.mode} · actual ${result.actualCredits ?? 0} credits. Searched ${addr}.`
         );
       }
+      setContactCostPreview(null);
       await openDetail(detail.id);
       await refreshLists();
+    } catch (e) {
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function previewOppContactHandoff() {
+    const ids = oppSelectedIds.size ? [...oppSelectedIds] : oppDetail ? [oppDetail.id] : [];
+    if (!ids.length) {
+      setMessage('Select pipeline opportunities (or open one) for contact review handoff.');
+      return;
+    }
+    if (!oppSoughtRole) {
+      setMessage('Choose which role is sought — never equate owner/applicant/contractor/borrower.');
+      return;
+    }
+    setBusy(true);
+    try {
+      const out = await api('/api/opportunities/contact-handoff', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          opportunityIds: ids,
+          sought_role: oppSoughtRole,
+          dryRun: true,
+        }),
+      });
+      setOppHandoffPreview(out);
+      setOppContactResults(null);
+      const p = out.preview || {};
+      setMessage(
+        `Handoff preview: ${p.deduplicatedTargetCount ?? 0} deduped · max $${p.maxEstimatedUsd ?? 0} · mode ${p.providerMode} · live ${p.liveEnrichmentStatus} · ambiguous ${out.ambiguous?.length || 0}`
+      );
+    } catch (e) {
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function confirmOppContactHandoff() {
+    if (!oppHandoffPreview?.preview?.purchaseAllowed) {
+      setMessage('Live enrichment is BLOCKED — fixture cost preview must show purchaseAllowed.');
+      return;
+    }
+    const ids = oppHandoffPreview.preview.targets.map((t) => t.opportunityId);
+    setBusy(true);
+    try {
+      const out = await api('/api/opportunities/contact-handoff', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          opportunityIds: ids,
+          sought_role: oppSoughtRole,
+          dryRun: false,
+          confirm: true,
+        }),
+      });
+      setOppContactResults(out);
+      setMessage(
+        `Contact review prepared: ${out.results?.length || 0} lookups · actual credits ${out.totalActualCredits ?? 0} (fixture $0) · live ${out.liveEnrichmentStatus}`
+      );
+    } catch (e) {
+      setMessage(String(e.message || e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function suppressContactChannel(c, channel) {
+    const value = channel === 'email' ? c.email : channel === 'mail' ? c.mailing_address : c.phone;
+    if (!value) {
+      setMessage(`No ${channel} value to suppress on this contact.`);
+      return;
+    }
+    const reason = window.prompt(`Reason to suppress ${channel} (${value})?`) || '';
+    if (!reason.trim()) return;
+    setBusy(true);
+    try {
+      await api('/api/contacts/suppress', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          channel,
+          value,
+          reason,
+          property_id: c.property_id,
+          full_name: c.full_name,
+        }),
+      });
+      setMessage(`Suppressed ${channel} — relookup/re-import will not resurrect.`);
+      if (detail) await openDetail(detail.id);
     } catch (e) {
       setMessage(String(e.message || e));
     } finally {
@@ -2428,10 +2579,49 @@ export default function App() {
 
                   <h3>Find contact information</h3>
                   <p className="muted">
-                    Roles are separate (owner ≠ applicant ≠ contractor). Provider return ≠ confirmed.
-                    Paid production contact lookup stays off in this trial.
+                    Ask which role is sought first — owner ≠ applicant ≠ contractor ≠ borrower.
+                    Provider return ≠ confirmed. Live enriched-lead pilot is{' '}
+                    <strong>BLOCKED</strong> (hard spend lock: production off, spend cap 0,
+                    fixture/sandbox only).
                     {isOwner && tracerfy ? ` Mode: ${tracerfy.mode}.` : ''}
                   </p>
+                  <div className="field">
+                    <label htmlFor="sought_role">Sought role (required)</label>
+                    <select
+                      id="sought_role"
+                      value={soughtRole}
+                      onChange={(e) => {
+                        setSoughtRole(e.target.value);
+                        setContactCostPreview(null);
+                      }}
+                    >
+                      <option value="">— choose role —</option>
+                      {SOUGHT_ROLE_OPTIONS.map((r) => (
+                        <option key={r} value={r}>
+                          {r}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  {contactCostPreview ? (
+                    <div className="attention-item" data-testid="contact-cost-preview">
+                      <strong>Cost preview (before lookup)</strong>
+                      <div>
+                        Deduped targets: {contactCostPreview.deduplicatedTargetCount} · Max estimated:{' '}
+                        {contactCostPreview.maxEstimatedCredits} credits ($
+                        {contactCostPreview.maxEstimatedUsd}) · Mode:{' '}
+                        {contactCostPreview.providerMode} · Available budget:{' '}
+                        {contactCostPreview.availableBudgetCredits}
+                        {contactCostPreview.fixtureCostZero ? ' · Fixture/sandbox cost $0' : ''}
+                      </div>
+                      <div className="muted">
+                        Live enrichment: {contactCostPreview.liveEnrichmentStatus}
+                        {contactCostPreview.liveEnrichmentBlockReason
+                          ? ` — ${contactCostPreview.liveEnrichmentBlockReason}`
+                          : ''}
+                      </div>
+                    </div>
+                  ) : null}
                   {selectedProperty() ? (
                     <div className="attention-item">
                       <strong>Address / parcel to search</strong>
@@ -2527,8 +2717,16 @@ export default function App() {
                     </button>
                     <button
                       type="button"
+                      className="btn"
+                      disabled={busy || !soughtRole}
+                      onClick={previewFindContacts}
+                    >
+                      Cost preview
+                    </button>
+                    <button
+                      type="button"
                       className="btn primary"
-                      disabled={busy}
+                      disabled={busy || !soughtRole || !contactCostPreview}
                       onClick={findContacts}
                     >
                       Find contact information
@@ -2602,6 +2800,12 @@ export default function App() {
                             ? ` · flags ${c.restriction_flags_json}`
                             : ''}
                         </div>
+                        <div className="muted">
+                          Sought: {c.sought_role || '—'} · entity: {c.entity_kind || '—'}
+                          {c.match_evidence_json && c.match_evidence_json !== '{}'
+                            ? ` · evidence stored`
+                            : ''}
+                        </div>
                         <div className="toolbar">
                           <button type="button" className="btn" onClick={() => setContactStatus(c.id, 'confirmed')}>
                             Accept
@@ -2609,6 +2813,21 @@ export default function App() {
                           <button type="button" className="btn" onClick={() => setContactStatus(c.id, 'rejected')}>
                             Reject
                           </button>
+                          {c.email ? (
+                            <button type="button" className="btn ghost" onClick={() => suppressContactChannel(c, 'email')}>
+                              Suppress email
+                            </button>
+                          ) : null}
+                          {c.phone ? (
+                            <button type="button" className="btn ghost" onClick={() => suppressContactChannel(c, 'phone')}>
+                              Suppress phone
+                            </button>
+                          ) : null}
+                          {c.phone ? (
+                            <button type="button" className="btn ghost" onClick={() => suppressContactChannel(c, 'sms')}>
+                              Suppress SMS
+                            </button>
+                          ) : null}
                         </div>
                       </li>
                     ))}
@@ -2797,8 +3016,9 @@ export default function App() {
           <p className="muted">
             Workbook-free Fairfax County browse for residential builder/developer relationship
             prospecting. Separate from Permits table search and from Run Fairfax checks (known-ID
-            re-check). Opportunities stay workspace-private and never auto-convert into marketing
-            leads. No paid contacts in this phase.
+            re-check).             Opportunities stay workspace-private and never auto-convert into marketing
+            leads. Contact review handoff is fixture/sandbox only — live enriched-lead pilot{' '}
+            <strong>BLOCKED</strong> (spend cap 0). Never invents borrower identity.
           </p>
 
           <div className="banner warn" role="region" aria-label="Coverage limitations">
@@ -3229,6 +3449,86 @@ export default function App() {
                       .map((m) => m.detail || m.rule)
                       .join(' · ') || '—'}
                   </p>
+                  <h4>Contact review handoff</h4>
+                  <p className="muted">
+                    Select sought role before any lookup. Property activity ≠ borrower. Fixture cost
+                    remains $0; live purchase path stays blocked.
+                  </p>
+                  <div className="field">
+                    <label htmlFor="opp-sought-role">Sought role</label>
+                    <select
+                      id="opp-sought-role"
+                      value={oppSoughtRole}
+                      onChange={(e) => {
+                        setOppSoughtRole(e.target.value);
+                        setOppHandoffPreview(null);
+                        setOppContactResults(null);
+                      }}
+                    >
+                      <option value="">— choose role —</option>
+                      {SOUGHT_ROLE_OPTIONS.map((r) => (
+                        <option key={r} value={r}>
+                          {r}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div className="toolbar">
+                    <button
+                      type="button"
+                      className="btn"
+                      disabled={busy || !oppSoughtRole}
+                      onClick={previewOppContactHandoff}
+                    >
+                      Cost preview ({oppSelectedIds.size || 1})
+                    </button>
+                    <button
+                      type="button"
+                      className="btn primary"
+                      disabled={busy || !oppHandoffPreview?.preview?.purchaseAllowed}
+                      onClick={confirmOppContactHandoff}
+                      data-testid="opp-contact-confirm"
+                    >
+                      Run fixture contact review
+                    </button>
+                  </div>
+                  {oppHandoffPreview ? (
+                    <div className="attention-item" data-testid="opp-handoff-preview">
+                      <strong>
+                        Preview · live {oppHandoffPreview.preview?.liveEnrichmentStatus || '—'}
+                      </strong>
+                      <div>
+                        Deduped: {oppHandoffPreview.preview?.deduplicatedTargetCount ?? 0} · Max $
+                        {oppHandoffPreview.preview?.maxEstimatedUsd ?? 0} · Mode:{' '}
+                        {oppHandoffPreview.preview?.providerMode} · Budget:{' '}
+                        {oppHandoffPreview.preview?.availableBudgetCredits}
+                      </div>
+                      {(oppHandoffPreview.ambiguous || []).length ? (
+                        <div className="muted">
+                          Ambiguous / skipped:{' '}
+                          {oppHandoffPreview.ambiguous
+                            .map((a) => `${a.officialId} (${a.reason})`)
+                            .join(' · ')}
+                        </div>
+                      ) : null}
+                      <div className="muted">{oppHandoffPreview.borrowerNote}</div>
+                    </div>
+                  ) : null}
+                  {oppContactResults?.results ? (
+                    <ul className="history" data-testid="opp-contact-results">
+                      {oppContactResults.results.map((r) => (
+                        <li key={r.opportunityId}>
+                          <span className="mono">{r.officialId}</span> · sought {r.soughtRole} ·{' '}
+                          {r.saved?.length || 0} candidate(s) · credits {r.actualCredits ?? 0}
+                          {(r.saved || []).map((c) => (
+                            <div key={c.id} className="muted">
+                              {c.full_name || c.company} · {c.role} · {c.status}
+                            </div>
+                          ))}
+                        </li>
+                      ))}
+                    </ul>
+                  ) : null}
                 </>
               ) : (
                 <p className="muted">Select a pipeline row to qualify, assign follow-up, or link.</p>

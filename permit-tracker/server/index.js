@@ -112,6 +112,18 @@ import {
 } from './contacts.js';
 import { setProviderMode, PROVIDER_MODES } from './providers/tracerfy.js';
 import {
+  previewContactLookupCost,
+  handoffOpportunitiesToContactReview,
+  suppressContactChannel,
+  listSuppressions,
+  phase6RightsStatus,
+  ensurePhase6HardSpendLock,
+  SOUGHT_ROLES,
+  FORBIDDEN_SOUGHT_ROLES,
+  SUPPRESSION_CHANNELS,
+  ROLE_NON_EQUIVALENCE_NOTE,
+} from './contactHandoff.js';
+import {
   USE_CLASSES,
   USE_CLASS_LABELS,
   USE_SOURCES,
@@ -1990,14 +2002,96 @@ function parseCrosswalkUpload(buffer, filename = '') {
 }
 
 // —— Contacts / Tracerfy ——
+ensurePhase6HardSpendLock();
+
 app.get('/api/contacts/meta', (_req, res) => {
   const cfg = tracerfyConfig();
   // Never expose tokens
   res.json({
     roles: CONTACT_ROLES,
+    soughtRoles: SOUGHT_ROLES,
+    forbiddenSoughtRoles: FORBIDDEN_SOUGHT_ROLES,
+    roleNonEquivalence: ROLE_NON_EQUIVALENCE_NOTE,
+    suppressionChannels: SUPPRESSION_CHANNELS,
     tracerfy: cfg,
     modes: PROVIDER_MODES,
+    phase6: phase6RightsStatus(),
   });
+});
+
+app.get('/api/contacts/rights', (_req, res) => {
+  res.json(phase6RightsStatus());
+});
+
+app.post('/api/contacts/cost-preview', requireAuth, (req, res) => {
+  try {
+    const body = req.body || {};
+    const targets = Array.isArray(body.targets)
+      ? body.targets
+      : Array.isArray(body.propertyIds)
+        ? body.propertyIds.map((id) => ({ propertyId: Number(id) }))
+        : Array.isArray(body.opportunityIds)
+          ? body.opportunityIds.map((id) => ({ opportunityId: Number(id) }))
+          : [];
+    const preview = previewContactLookupCost({
+      targets,
+      endpointKey: body.endpoint || 'instant_trace',
+      soughtRole: body.sought_role || body.soughtRole,
+    });
+    if (!preview.ok) return res.status(400).json(preview);
+    res.json(preview);
+  } catch (e) {
+    res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
+app.get('/api/contacts/suppressions', requireAuth, (req, res) => {
+  res.json({
+    suppressions: listSuppressions({
+      channel: req.query.channel || null,
+      propertyId: req.query.propertyId ? Number(req.query.propertyId) : null,
+    }),
+  });
+});
+
+app.post('/api/contacts/suppress', requireAuth, (req, res) => {
+  try {
+    const body = req.body || {};
+    const row = suppressContactChannel(
+      {
+        channel: body.channel,
+        value: body.value,
+        reason: body.reason,
+        propertyId: body.property_id || body.propertyId || null,
+        opportunityId: body.opportunity_id || body.opportunityId || null,
+        fullName: body.full_name || body.fullName || '',
+      },
+      { actor: currentUser() }
+    );
+    res.json({ suppression: row });
+  } catch (e) {
+    res.status(400).json({ error: String(e.message || e) });
+  }
+});
+
+app.post('/api/opportunities/contact-handoff', requireAuth, async (req, res) => {
+  try {
+    const body = req.body || {};
+    const out = await handoffOpportunitiesToContactReview({
+      opportunityIds: body.opportunityIds || body.opportunity_ids || [],
+      soughtRole: body.sought_role || body.soughtRole,
+      endpointKey: body.endpoint || 'instant_trace',
+      dryRun: body.dryRun !== false && body.confirm !== true,
+      actor: currentUser(),
+    });
+    if (!out.ok && out.error === 'live_enrichment_blocked') {
+      return res.status(403).json(out);
+    }
+    if (!out.ok) return res.status(400).json(out);
+    res.json(out);
+  } catch (e) {
+    res.status(400).json({ error: String(e.message || e) });
+  }
 });
 
 app.post('/api/contacts/provider-mode', requireAuth, requireOwner, (req, res) => {
@@ -2043,6 +2137,24 @@ app.post('/api/contacts/:id/status', requireAuth, (req, res) => {
 app.post('/api/contacts/find', requireAuth, async (req, res) => {
   try {
     const permitRecordId = req.body?.permit_record_id ? Number(req.body.permit_record_id) : null;
+    const soughtRole = req.body?.sought_role || req.body?.soughtRole;
+    if (!soughtRole) {
+      return res.status(400).json({
+        error: 'sought_role_required',
+        detail:
+          'Ask which role is sought before Find contacts. Applicant ≠ contractor ≠ owner ≠ borrower.',
+        soughtRoles: SOUGHT_ROLES,
+      });
+    }
+    // Cost preview gate — show counts/budget before purchase path (fixture remains $0)
+    if (req.body?.preview_only) {
+      const preview = previewContactLookupCost({
+        targets: [{ propertyId: Number(req.body?.property_id) }],
+        endpointKey: req.body?.endpoint || 'instant_trace',
+        soughtRole,
+      });
+      return res.json(preview);
+    }
     // When a permit is selected, always enforce confirmed property association server-side.
     // Standalone property lookups (no permit_record_id) stay property-level.
     // Never accept client forceFail / requireConfirmedLink overrides on this route.
@@ -2052,6 +2164,8 @@ app.post('/api/contacts/find', requireAuth, async (req, res) => {
       endpointKey: req.body?.endpoint || 'instant_trace',
       forceFail: null,
       requireConfirmedLink: Boolean(permitRecordId),
+      soughtRole,
+      opportunityId: req.body?.opportunity_id ? Number(req.body.opportunity_id) : null,
     });
     res.json(result);
   } catch (e) {

@@ -105,6 +105,7 @@ test('HTTP: forceFail and requireConfirmedLink client overrides ignored', async 
     const denied = await json('POST', '/api/contacts/find', {
       property_id: prop.id,
       permit_record_id: permitId,
+      sought_role: 'property_owner',
       requireConfirmedLink: false,
       forceFail: 'no_match',
     });
@@ -150,6 +151,7 @@ test('cache reuse: needs_review contacts stay review; identity mismatch skips ca
   });
 
   const first = await findContactsForProperty({
+    soughtRole: 'property_owner',
     propertyId: prop.id,
     permitRecordId: permitId,
     forceFail: null,
@@ -170,6 +172,7 @@ test('cache reuse: needs_review contacts stay review; identity mismatch skips ca
 
   // New lookup fingerprint (different address) — should not revive needs_review rows as current
   const second = await findContactsForProperty({
+    soughtRole: 'property_owner',
     propertyId: changed.id,
     permitRecordId: permitId,
   });

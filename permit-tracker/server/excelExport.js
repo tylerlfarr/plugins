@@ -243,9 +243,9 @@ export function exportCoexistenceXlsx({
   const mst = db.prepare('SELECT * FROM mst_reference_ids ORDER BY id').all();
 
   const statusPlaceholders = statuses.map(() => '?').join(',');
-  let contactsSql = `SELECT c.role, c.full_name, c.company, c.phone, c.email, c.mailing_address,
+  let contactsSql = `SELECT c.role, c.sought_role, c.entity_kind, c.full_name, c.company, c.phone, c.email, c.mailing_address,
               c.provider, c.provider_source, c.retrieved_at, c.validation_state, c.status,
-              c.restriction_flags_json, c.record_origin,
+              c.restriction_flags_json, c.record_origin, c.match_evidence_json, c.opportunity_id,
               pr.site_address, pr.city, pr.state, pr.zip, pr.parcel_apn,
               cs.project_code, cs.community_name, lg.lot_label, c.permit_record_id
        FROM contacts c
@@ -255,7 +255,16 @@ export function exportCoexistenceXlsx({
        WHERE c.record_origin NOT IN ('sandbox_demo','local_fixture')
          AND c.status IN (${statusPlaceholders})
          AND c.status NOT IN ('rejected','outdated')
-         AND (c.provider_source IS NULL OR c.provider_source NOT IN ('hosted_sandbox','local_fixture','sandbox_fabricated'))`;
+         AND (c.provider_source IS NULL OR c.provider_source NOT IN ('hosted_sandbox','local_fixture','sandbox_fabricated'))
+         AND NOT EXISTS (
+           SELECT 1 FROM contact_suppressions s
+           WHERE (
+             (s.channel = 'email' AND c.email != '' AND s.value_normalized = lower(c.email))
+             OR (s.channel IN ('phone','sms') AND c.phone != '' AND s.value_normalized = replace(replace(replace(lower(c.phone),'-',''),' ',''),'+',''))
+             OR (s.channel = 'mail' AND c.mailing_address != '' AND s.value_normalized = lower(c.mailing_address))
+           )
+           AND (s.property_id IS NULL OR s.property_id = c.property_id OR s.property_id_key = 0)
+         )`;
   const contactParams = [...statuses];
   if (filtered) {
     contactsSql += ` AND c.permit_record_id IN (${idList.map(() => '?').join(',')})`;

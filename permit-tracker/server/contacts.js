@@ -16,6 +16,44 @@ export const CONTACT_ROLES = [
 
 export const CONTACT_STATUSES = ['candidate', 'confirmed', 'rejected', 'outdated', 'needs_review'];
 
+function normalizeChannelValueLocal(channel, value) {
+  const ch = String(channel || '').toLowerCase();
+  let v = String(value || '').trim().toLowerCase();
+  if (!v) return null;
+  if (ch === 'phone' || ch === 'sms') {
+    v = v.replace(/[^\d+]/g, '');
+    if (v.startsWith('+1') && v.length === 12) v = v.slice(2);
+    if (v.length === 11 && v.startsWith('1')) v = v.slice(1);
+  }
+  if (ch === 'email') v = v.replace(/\s+/g, '');
+  if (ch === 'mail') v = v.replace(/\s+/g, ' ');
+  return v || null;
+}
+
+/** Channel suppressions survive re-import; never silently reaccept. */
+export function isChannelSuppressed(channel, value, propertyId = null) {
+  const normalized = normalizeChannelValueLocal(channel, value);
+  if (!normalized) return null;
+  return (
+    db
+      .prepare(
+        `SELECT * FROM contact_suppressions
+         WHERE channel = ? AND value_normalized = ?
+           AND (property_id IS NULL OR property_id = ? OR property_id_key = 0)
+         LIMIT 1`
+      )
+      .get(channel, normalized, propertyId == null ? -1 : Number(propertyId)) || null
+  );
+}
+
+function contactSuppressed(c, propertyId) {
+  if (c.email && isChannelSuppressed('email', c.email, propertyId)) return 'email';
+  if (c.phone && isChannelSuppressed('phone', c.phone, propertyId)) return 'phone';
+  if (c.phone && isChannelSuppressed('sms', c.phone, propertyId)) return 'sms';
+  if (c.mailing_address && isChannelSuppressed('mail', c.mailing_address, propertyId)) return 'mail';
+  return null;
+}
+
 export function listContacts({
   permitId,
   propertyId,
@@ -49,7 +87,21 @@ export function listContacts({
 }
 
 export function addManualContact(fields, { actor = 'ui', allowProviderProvenance = false } = {}) {
-  const role = CONTACT_ROLES.includes(fields.role) ? fields.role : 'unknown_party';
+  const rawRole = String(fields.role || '')
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, '_');
+  // Never store or equate borrower from property/owner evidence (check before remapping)
+  if (
+    ['borrower', 'mortgage_borrower', 'mortgagor', 'loan_applicant', 'homeowner_financing', 'buyer'].includes(
+      rawRole
+    )
+  ) {
+    throw new Error(
+      'Borrower / financing roles are not permitted contact roles. Property ownership ≠ borrower identity.'
+    );
+  }
+  const role = CONTACT_ROLES.includes(rawRole) ? rawRole : 'unknown_party';
   // Internal assignees are labeled distinctly from property owners / external parties
   const notes =
     role === 'internal_assignee'
@@ -67,19 +119,32 @@ export function addManualContact(fields, { actor = 'ui', allowProviderProvenance
     ? fields.validation_state || 'provider_returned'
     : 'user_confirmed';
 
+  const matchEvidence = fields.match_evidence || {
+    entity: fields.full_name || fields.company || '',
+    role,
+    sought_role: fields.sought_role || '',
+    provider,
+    provider_source,
+    retrieved_at: new Date().toISOString(),
+    candidate_status: fields.status || (allowProviderProvenance ? 'candidate' : 'confirmed'),
+  };
+
   const info = db
     .prepare(
       `INSERT INTO contacts(
-         property_id, permit_record_id, lot_group_id, role, full_name, company, phone, email,
+         property_id, permit_record_id, lot_group_id, role, sought_role, entity_kind, full_name, company, phone, email,
          mailing_address, provider, provider_source, retrieved_at, validation_state, status,
-         restriction_flags_json, phone_candidates_json, email_candidates_json, record_origin, notes)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?)`
+         restriction_flags_json, phone_candidates_json, email_candidates_json, record_origin, notes,
+         match_evidence_json, opportunity_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     )
     .run(
       fields.property_id || null,
       fields.permit_record_id || null,
       fields.lot_group_id || null,
       role,
+      fields.sought_role || '',
+      fields.entity_kind || (fields.company && !fields.full_name ? 'organization' : 'person'),
       fields.full_name || '',
       fields.company || '',
       fields.phone || '',
@@ -93,7 +158,9 @@ export function addManualContact(fields, { actor = 'ui', allowProviderProvenance
       JSON.stringify(fields.phone_candidates || []),
       JSON.stringify(fields.email_candidates || []),
       record_origin,
-      notes
+      notes,
+      JSON.stringify(matchEvidence),
+      fields.opportunity_id || null
     );
   return db.prepare('SELECT * FROM contacts WHERE id = ?').get(Number(info.lastInsertRowid));
 }
@@ -144,9 +211,31 @@ export async function findContactsForProperty({
   endpointKey = 'instant_trace',
   forceFail = null, // tests only — never accept from operational HTTP
   requireConfirmedLink = true,
+  soughtRole = null,
+  opportunityId = null,
 } = {}) {
   const property = getProperty(propertyId);
   if (!property) throw new Error('Property not found');
+
+  // Phase 6: require an explicit sought role — never equate owner/applicant/contractor/borrower
+  if (!soughtRole) {
+    throw new Error(
+      'sought_role required — ask which role is sought before lookup. Applicant ≠ contractor ≠ owner ≠ borrower.'
+    );
+  }
+  const normalizedRole = String(soughtRole).trim().toLowerCase().replace(/[\s-]+/g, '_');
+  if (
+    ['borrower', 'mortgage_borrower', 'mortgagor', 'loan_applicant', 'homeowner_financing', 'buyer'].includes(
+      normalizedRole
+    )
+  ) {
+    throw new Error(
+      `Forbidden sought role "${normalizedRole}". A permitted property does not identify a mortgage borrower.`
+    );
+  }
+  if (!CONTACT_ROLES.includes(normalizedRole) || normalizedRole === 'internal_assignee') {
+    throw new Error(`Invalid sought_role "${soughtRole}"`);
+  }
 
   const permit = permitRecordId
     ? db.prepare('SELECT * FROM permit_records WHERE id = ?').get(Number(permitRecordId))
@@ -174,6 +263,8 @@ export async function findContactsForProperty({
     lotGroupId,
     endpointKey,
     forceFail,
+    soughtRole: normalizedRole,
+    opportunityId,
   });
 
   if (result.blocked || result.error || result.inFlight) {
@@ -218,17 +309,38 @@ export async function findContactsForProperty({
 
   const rejected = rejectedFingerprints(propertyId);
   const saved = [];
+  const suppressedSkipped = [];
+  const rejectedSkipped = [];
   if (mayAttach && result.contacts?.length) {
     for (const c of result.contacts) {
       if (c._cachedContactId) {
         // Already persisted from prior job — return as-is, do not duplicate
         const existing = db.prepare('SELECT * FROM contacts WHERE id = ?').get(c._cachedContactId);
-        if (existing && existing.status !== 'rejected') saved.push(existing);
+        if (existing && existing.status !== 'rejected') {
+          const sup = contactSuppressed(existing, propertyId);
+          if (sup) {
+            suppressedSkipped.push({ contactId: existing.id, channel: sup });
+            continue;
+          }
+          saved.push(existing);
+        } else if (existing?.status === 'rejected') {
+          rejectedSkipped.push({ contactId: existing.id, reason: existing.rejected_reason });
+        }
         continue;
       }
       const fp = contactFingerprint(c);
       if (rejected.has(fp)) {
         // Preserve rejection — do not resurrect
+        rejectedSkipped.push({ fingerprint: fp, reason: 'prior_rejection' });
+        continue;
+      }
+      const suppressedChannel = contactSuppressed(c, propertyId);
+      if (suppressedChannel) {
+        suppressedSkipped.push({
+          full_name: c.full_name,
+          channel: suppressedChannel,
+          reason: 'channel_suppression',
+        });
         continue;
       }
       const existingSame = db
@@ -252,12 +364,33 @@ export async function findContactsForProperty({
           : cfg.mode === PROVIDER_MODES.HOSTED_SANDBOX
             ? 'hosted_sandbox'
             : 'tracerfy_live';
+      // Provider may hint property_owner; still tag with the explicitly sought role for review.
+      // Never rewrite sought role into borrower.
+      const assignedRole =
+        normalizedRole === 'property_owner' && c.role === 'property_owner'
+          ? 'property_owner'
+          : normalizedRole;
+      const matchEvidence = {
+        entity: c.full_name || c.company || '',
+        provider_hint_role: c.role || 'unknown_party',
+        sought_role: normalizedRole,
+        assigned_role: assignedRole,
+        provider: 'tracerfy',
+        provider_source: source,
+        retrieval_date: new Date().toISOString(),
+        candidate_status: 'candidate',
+        opportunity_id: opportunityId || null,
+        property_id: propertyId,
+        note: 'Roles are not equated — review whether this candidate matches the sought role.',
+      };
       const row = addManualContact(
         {
           property_id: propertyId,
           permit_record_id: permitRecordId,
           lot_group_id: lotGroupId,
-          role: c.role,
+          role: assignedRole,
+          sought_role: normalizedRole,
+          entity_kind: c.company && !c.full_name ? 'organization' : 'person',
           full_name: c.full_name,
           company: c.company,
           phone: c.phone,
@@ -271,10 +404,12 @@ export async function findContactsForProperty({
           record_origin: origin,
           status: 'candidate',
           validation_state: 'provider_returned',
+          opportunity_id: opportunityId || null,
+          match_evidence: matchEvidence,
           notes:
             origin !== 'provider'
-              ? `${String(cfg.mode).toUpperCase()} DEMO CONTACT — not operational`
-              : '',
+              ? `${String(cfg.mode).toUpperCase()} DEMO CONTACT — not operational · sought:${normalizedRole}`
+              : `sought:${normalizedRole}`,
         },
         { actor: 'provider', allowProviderProvenance: true }
       );
@@ -291,6 +426,9 @@ export async function findContactsForProperty({
     attached: saved.length > 0,
     isolation,
     provider: cfg,
+    soughtRole: normalizedRole,
+    suppressedSkipped,
+    rejectedSkipped,
     readinessUnchanged: true,
     searchedAddress: {
       site_address: property.site_address,

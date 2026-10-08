@@ -40,6 +40,7 @@ function importPermit() {
 }
 
 test('uncertain timeout retains reserved_uncertain against production cap', async () => {
+  setSetting('tracerfy_hard_spend_lock', '0');
   setSetting('tracerfy_production_enabled', '1');
   setSetting('tracerfy_spend_limit_credits', '10');
   setSetting('tracerfy_commercial_confirmed', '1');
@@ -99,11 +100,13 @@ test('uncertain timeout retains reserved_uncertain against production cap', asyn
   assert.ok(audit >= 1);
 
   setSetting('tracerfy_production_enabled', '0');
+  setSetting('tracerfy_hard_spend_lock', '1');
   delete process.env.TRACERFY_API_TOKEN;
   setProviderMode(PROVIDER_MODES.LOCAL_FIXTURE);
 });
 
 test('manual_abandon keeps resubmit blocked and retains uncertain hold; allow_resubmit needs evidence', async () => {
+  setSetting('tracerfy_hard_spend_lock', '0');
   setSetting('tracerfy_production_enabled', '1');
   setSetting('tracerfy_spend_limit_credits', '50');
   setSetting('tracerfy_commercial_confirmed', '1');
@@ -174,6 +177,7 @@ test('manual_abandon keeps resubmit blocked and retains uncertain hold; allow_re
   );
 
   setSetting('tracerfy_production_enabled', '0');
+  setSetting('tracerfy_hard_spend_lock', '1');
   delete process.env.TRACERFY_API_TOKEN;
   setProviderMode(PROVIDER_MODES.LOCAL_FIXTURE);
 });
@@ -209,6 +213,7 @@ test('hosted_sandbox rejects operational property before network', async () => {
   await assert.rejects(
     () =>
       findContactsForProperty({
+    soughtRole: 'property_owner',
         propertyId: opsProp.id,
         permitRecordId: permit.id,
       }),
@@ -228,6 +233,7 @@ test('hosted_sandbox rejects operational property before network', async () => {
   );
   assert.equal(propertyInvolvesOperationalData(sand), false);
   const ok = await findContactsForProperty({
+    soughtRole: 'property_owner',
     propertyId: sand.id,
     forceFail: 'no_match',
     requireConfirmedLink: false,
@@ -260,6 +266,7 @@ test('standalone property lookup does not implicit-attach latest lot; permit att
   });
 
   const standalone = await findContactsForProperty({
+    soughtRole: 'property_owner',
     propertyId: prop.id,
     requireConfirmedLink: false,
   });
@@ -288,6 +295,7 @@ test('standalone property lookup does not implicit-attach latest lot; permit att
   await assert.rejects(
     () =>
       findContactsForProperty({
+    soughtRole: 'property_owner',
         propertyId: unconfirmed.id,
         permitRecordId: permit.id,
       }),

@@ -232,6 +232,7 @@ test('fixture/sandbox never attach to operational; production stub attaches; rej
 
   setProviderMode(PROVIDER_MODES.LOCAL_FIXTURE);
   const isolated = await findContactsForProperty({
+    soughtRole: 'property_owner',
     propertyId: property.id,
     permitRecordId: permit.id,
   });
@@ -249,12 +250,14 @@ test('fixture/sandbox never attach to operational; production stub attaches; rej
     },
     { actor: 'test' }
   );
-  const sandResult = await findContactsForProperty({ propertyId: sand.id, requireConfirmedLink: false });
+  const sandResult = await findContactsForProperty({
+    soughtRole: 'property_owner', propertyId: sand.id, requireConfirmedLink: false });
   assert.ok(sandResult.saved.length >= 1);
   assert.equal(sandResult.saved[0].record_origin, 'local_fixture');
   setContactStatus(sandResult.saved[0].id, 'rejected', { reason: 'wrong_person', actor: 'test' });
 
-  const again = await findContactsForProperty({ propertyId: sand.id, requireConfirmedLink: false });
+  const again = await findContactsForProperty({
+    soughtRole: 'property_owner', propertyId: sand.id, requireConfirmedLink: false });
   assert.equal(again.deduped, true);
   // Rejected must not reappear as new candidate
   const live = listContacts({ propertyId: sand.id, includeDemo: true });
@@ -262,6 +265,7 @@ test('fixture/sandbox never attach to operational; production stub attaches; rej
   assert.ok(!live.some((c) => c.status === 'candidate' && c.full_name === sandResult.saved[0].full_name));
 
   // Production attach with stubbed provider (forceFail path, no paid request)
+  setSetting('tracerfy_hard_spend_lock', '0');
   setSetting('tracerfy_production_enabled', '1');
   setSetting('tracerfy_spend_limit_credits', '100');
   setSetting('tracerfy_commercial_confirmed', '1');
@@ -285,6 +289,7 @@ test('fixture/sandbox never attach to operational; production stub attaches; rej
     confirmedBy: 'test',
   });
   const noMatch = await findContactsForProperty({
+    soughtRole: 'property_owner',
     propertyId: prodProp.id,
     permitRecordId: permit.id,
     forceFail: 'no_match',
@@ -294,6 +299,7 @@ test('fixture/sandbox never attach to operational; production stub attaches; rej
 
   // Cleanup production gates so other tests stay fixture
   setSetting('tracerfy_production_enabled', '0');
+  setSetting('tracerfy_hard_spend_lock', '1');
   delete process.env.TRACERFY_API_TOKEN;
   setProviderMode(PROVIDER_MODES.LOCAL_FIXTURE);
 });
@@ -311,6 +317,7 @@ test('timeout remains unresolved; reconcile is manual not auto-safe; concurrent 
     { actor: 'test' }
   );
   const timed = await findContactsForProperty({
+    soughtRole: 'property_owner',
     propertyId: prop.id,
     forceFail: 'timeout',
     requireConfirmedLink: false,
@@ -320,6 +327,7 @@ test('timeout remains unresolved; reconcile is manual not auto-safe; concurrent 
 
   // Blind resubmit blocked
   const blocked = await findContactsForProperty({
+    soughtRole: 'property_owner',
     propertyId: prop.id,
     requireConfirmedLink: false,
   });
@@ -331,6 +339,7 @@ test('timeout remains unresolved; reconcile is manual not auto-safe; concurrent 
 
   // Abandon keeps automatic resubmit blocked
   const stillBlocked = await findContactsForProperty({
+    soughtRole: 'property_owner',
     propertyId: prop.id,
     requireConfirmedLink: false,
   });
@@ -344,6 +353,7 @@ test('timeout remains unresolved; reconcile is manual not auto-safe; concurrent 
   });
   assert.equal(allowed.safeToResubmit, true);
   const after = await findContactsForProperty({
+    soughtRole: 'property_owner',
     propertyId: prop.id,
     forceFail: 'no_match',
     requireConfirmedLink: false,
@@ -351,6 +361,7 @@ test('timeout remains unresolved; reconcile is manual not auto-safe; concurrent 
   assert.equal(after.noMatch, true);
 
   // Spend limit reservation for production
+  setSetting('tracerfy_hard_spend_lock', '0');
   setSetting('tracerfy_production_enabled', '1');
   setSetting('tracerfy_spend_limit_credits', '5');
   setSetting('tracerfy_commercial_confirmed', '1');
@@ -374,6 +385,7 @@ test('timeout remains unresolved; reconcile is manual not auto-safe; concurrent 
   const spend = await runContactLookup({ property: capped, endpointKey: 'instant_trace' });
   assert.equal(spend.error?.error, 'spend_limit');
   setSetting('tracerfy_production_enabled', '0');
+  setSetting('tracerfy_hard_spend_lock', '1');
   delete process.env.TRACERFY_API_TOKEN;
   setProviderMode(PROVIDER_MODES.LOCAL_FIXTURE);
 });
@@ -448,6 +460,7 @@ test('http failure modes are failures not empty success', async () => {
     { actor: 'test' }
   );
   const unauth = await findContactsForProperty({
+    soughtRole: 'property_owner',
     propertyId: prop.id,
     forceFail: 'http_401',
     requireConfirmedLink: false,
@@ -456,6 +469,7 @@ test('http failure modes are failures not empty success', async () => {
   assert.ok(unauth.error?.status === 401);
 
   const mal = await findContactsForProperty({
+    soughtRole: 'property_owner',
     propertyId: prop.id,
     forceFail: 'malformed',
     requireConfirmedLink: false,

@@ -45,19 +45,30 @@ export const PROVIDER_MODES = Object.freeze({
   PRODUCTION: 'production',
 });
 
+/** Phase 6 hard spend lock — production off, spend cap 0 unless explicitly unlocked. */
+export function hardSpendLockActive() {
+  if (process.env.TRACERFY_HARD_SPEND_LOCK === '0') return false;
+  return getSetting('tracerfy_hard_spend_lock', '1') !== '0';
+}
+
 export function tracerfyConfig() {
+  const hardLock = hardSpendLockActive();
   const requested =
     getSetting('tracerfy_provider_mode', '') ||
     process.env.TRACERFY_PROVIDER_MODE ||
     PROVIDER_MODES.LOCAL_FIXTURE;
   const productionGates =
+    !hardLock &&
     getSetting('tracerfy_production_enabled', '0') === '1' &&
     Boolean(process.env.TRACERFY_API_TOKEN || getSetting('tracerfy_api_token_present', '0') === '1') &&
     Boolean(getSetting('tracerfy_spend_limit_credits', '')) &&
+    Number(getSetting('tracerfy_spend_limit_credits', '0') || 0) > 0 &&
     getSetting('tracerfy_commercial_confirmed', '0') === '1';
 
   let mode = requested;
-  if (requested === PROVIDER_MODES.PRODUCTION && !productionGates) {
+  if (hardLock && requested === PROVIDER_MODES.PRODUCTION) {
+    mode = 'not_configured';
+  } else if (requested === PROVIDER_MODES.PRODUCTION && !productionGates) {
     mode = 'not_configured';
   }
   // Legacy env: TRACERFY_LIVE_SANDBOX=1 selects hosted sandbox when mode unset/fixture
@@ -69,21 +80,27 @@ export function tracerfyConfig() {
     mode = PROVIDER_MODES.HOSTED_SANDBOX;
   }
 
+  const spendLimitCredits = hardLock
+    ? 0
+    : Number(getSetting('tracerfy_spend_limit_credits', '0') || 0);
+
   return {
     mode,
     requestedMode: requested,
     productionEnabled: productionGates && mode === PROVIDER_MODES.PRODUCTION,
     productionGatesOk: productionGates,
+    hardSpendLock: hardLock,
+    liveEnrichedLeadPilot: hardLock || !productionGates ? 'BLOCKED' : 'gated',
     sandboxBase: SANDBOX_BASE,
     productionBase: PROD_BASE,
-    spendLimitCredits: Number(getSetting('tracerfy_spend_limit_credits', '0') || 0),
+    spendLimitCredits,
     tokenPresent: Boolean(process.env.TRACERFY_API_TOKEN || getSetting('tracerfy_api_token_present', '0') === '1'),
     commercialConfirmed: getSetting('tracerfy_commercial_confirmed', '0') === '1',
     endpoints: TRACERFY_ENDPOINTS,
     pricingNote:
-      'Pay-as-you-go ≈ $0.02/credit. Instant Trace / APN Instant = 5 credits/hit ($0.10), 0 on miss. Hosted sandbox free.',
+      'Pay-as-you-go ≈ $0.02/credit. Instant Trace / APN Instant = 5 credits/hit ($0.10), 0 on miss. Hosted sandbox free. Fixture/sandbox billable cost is always $0.',
     rightsUnresolved:
-      'Display/storage/export rights for contact data under Tracerfy terms not fully resolved from public pages — treat as operator legal review before any production export of provider contacts.',
+      'Display/storage/export rights for contact data under Tracerfy terms not fully resolved from public pages — treat as operator legal review before any production export of provider contacts. Live enriched-lead pilot BLOCKED until separate rights/budget approval.',
     modes: Object.values(PROVIDER_MODES),
   };
 }
@@ -276,25 +293,34 @@ export function productionCapUsage() {
   return usageSum(PROVIDER_MODES.PRODUCTION, CAP_CHARGE_KINDS);
 }
 
+/**
+ * Atomic credit reservation so concurrent jobs cannot race past the cap.
+ * Fixture/sandbox: simulated reservation only; billable cost remains zero.
+ */
 function reserveCredits({ mode, endpoint, estimated, jobId }) {
-  if (mode !== PROVIDER_MODES.PRODUCTION) {
-    // Simulate reservation for sandbox/fixture accounting visibility only
+  const run = db.transaction(() => {
+    if (mode !== PROVIDER_MODES.PRODUCTION) {
+      db.prepare(
+        `INSERT INTO provider_usage(provider, mode, endpoint, credits, job_id, charge_kind)
+         VALUES ('tracerfy', ?, ?, ?, ?, 'reserved_simulated')`
+      ).run(mode, endpoint, estimated, jobId);
+      return { reserved: estimated, chargeKind: 'reserved_simulated', billable: 0 };
+    }
+    if (hardSpendLockActive()) {
+      return { blocked: true, reason: 'hard_spend_lock', reserved: 0, spendLimit: 0 };
+    }
+    const spendLimit = Number(getSetting('tracerfy_spend_limit_credits', '0') || 0);
+    const reserved = productionCapUsage();
+    if (reserved + estimated > spendLimit) {
+      return { blocked: true, reason: 'spend_limit', reserved, spendLimit };
+    }
     db.prepare(
       `INSERT INTO provider_usage(provider, mode, endpoint, credits, job_id, charge_kind)
-       VALUES ('tracerfy', ?, ?, ?, ?, 'reserved_simulated')`
-    ).run(mode, endpoint, estimated, jobId);
-    return { reserved: estimated, chargeKind: 'reserved_simulated' };
-  }
-  const spendLimit = Number(getSetting('tracerfy_spend_limit_credits', '0') || 0);
-  const reserved = productionCapUsage();
-  if (reserved + estimated > spendLimit) {
-    return { blocked: true, reason: 'spend_limit', reserved, spendLimit };
-  }
-  db.prepare(
-    `INSERT INTO provider_usage(provider, mode, endpoint, credits, job_id, charge_kind)
-     VALUES ('tracerfy', ?, ?, ?, ?, 'reserved')`
-  ).run(PROVIDER_MODES.PRODUCTION, endpoint, estimated, jobId);
-  return { reserved: estimated, chargeKind: 'reserved' };
+       VALUES ('tracerfy', ?, ?, ?, ?, 'reserved')`
+    ).run(PROVIDER_MODES.PRODUCTION, endpoint, estimated, jobId);
+    return { reserved: estimated, chargeKind: 'reserved', billable: estimated };
+  });
+  return run.immediate();
 }
 
 /**
@@ -471,6 +497,8 @@ export async function runContactLookup({
   lotGroupId = null,
   endpointKey = 'instant_trace',
   forceFail = null,
+  soughtRole = '',
+  opportunityId = null,
 } = {}) {
   const cfg = tracerfyConfig();
   const endpoint = TRACERFY_ENDPOINTS[endpointKey];
@@ -478,7 +506,9 @@ export async function runContactLookup({
 
   if (cfg.mode === 'not_configured') {
     throw new Error(
-      'Tracerfy production Not configured — need TRACERFY_API_TOKEN env, spend limit, commercial confirmation, and production_enabled=1. Use local_fixture or hosted_sandbox meanwhile.'
+      cfg.hardSpendLock
+        ? 'Live Tracerfy production blocked by Phase 6 hard spend lock (production disabled, spend cap 0). Use local_fixture or hosted_sandbox only.'
+        : 'Tracerfy production Not configured — need TRACERFY_API_TOKEN env, spend limit, commercial confirmation, and production_enabled=1. Use local_fixture or hosted_sandbox meanwhile.'
     );
   }
 
@@ -522,6 +552,7 @@ export async function runContactLookup({
     mode: cfg.mode,
     property_id: property.id,
     identity_key: property.identity_key || '',
+    sought_role: soughtRole || '',
     input,
   });
 
@@ -594,8 +625,9 @@ export async function runContactLookup({
     .prepare(
       `INSERT INTO contact_jobs(
          provider, mode, property_id, permit_record_id, lot_group_id, request_fingerprint,
-         endpoint, status, estimated_credits, reserved_credits, request_json, attempts)
-       VALUES ('tracerfy', ?, ?, ?, ?, ?, ?, 'queued', ?, 0, ?, 0)`
+         endpoint, status, estimated_credits, reserved_credits, request_json, attempts,
+         sought_role, opportunity_id)
+       VALUES ('tracerfy', ?, ?, ?, ?, ?, ?, 'queued', ?, 0, ?, 0, ?, ?)`
     )
     .run(
       cfg.mode,
@@ -605,7 +637,9 @@ export async function runContactLookup({
       fingerprint,
       endpoint.path,
       endpoint.estimatedCredits,
-      JSON.stringify(input)
+      JSON.stringify(input),
+      soughtRole || '',
+      opportunityId || null
     );
   const jobId = Number(info.lastInsertRowid);
 

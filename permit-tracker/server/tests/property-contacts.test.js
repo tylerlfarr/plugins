@@ -123,6 +123,7 @@ test('sandbox find contacts isolated from operational import records', async () 
 
   const beforeReady = assessPermitReadiness(permit.id).state;
   const isolated = await findContactsForProperty({
+    soughtRole: 'property_owner',
     propertyId: property.id,
     permitRecordId: permit.id,
     endpointKey: 'instant_trace',
@@ -143,6 +144,7 @@ test('sandbox find contacts isolated from operational import records', async () 
     { actor: 'test' }
   );
   const sand = await findContactsForProperty({
+    soughtRole: 'property_owner',
     propertyId: sandboxProp.id,
     requireConfirmedLink: false,
   });
@@ -166,6 +168,7 @@ test('provider failure modes: no match, credits, rate limit, timeout reconcile, 
     );
   }
   const miss = await findContactsForProperty({
+    soughtRole: 'property_owner',
     propertyId: sandAddr(2).id,
     forceFail: 'no_match',
     requireConfirmedLink: false,
@@ -173,6 +176,7 @@ test('provider failure modes: no match, credits, rate limit, timeout reconcile, 
   assert.equal(miss.noMatch, true);
 
   const credits = await findContactsForProperty({
+    soughtRole: 'property_owner',
     propertyId: sandAddr(3).id,
     forceFail: 'insufficient_credits',
     requireConfirmedLink: false,
@@ -180,6 +184,7 @@ test('provider failure modes: no match, credits, rate limit, timeout reconcile, 
   assert.equal(credits.job.status, 'failed');
 
   const rate = await findContactsForProperty({
+    soughtRole: 'property_owner',
     propertyId: sandAddr(4).id,
     forceFail: 'rate_limit',
     requireConfirmedLink: false,
@@ -187,6 +192,7 @@ test('provider failure modes: no match, credits, rate limit, timeout reconcile, 
   assert.equal(rate.job.status, 'failed');
 
   const timed = await findContactsForProperty({
+    soughtRole: 'property_owner',
     propertyId: sandAddr(5).id,
     forceFail: 'timeout',
     requireConfirmedLink: false,
@@ -199,10 +205,12 @@ test('provider failure modes: no match, credits, rate limit, timeout reconcile, 
 
   const dedupeProp = sandAddr(6);
   const first = await findContactsForProperty({
+    soughtRole: 'property_owner',
     propertyId: dedupeProp.id,
     requireConfirmedLink: false,
   });
   const second = await findContactsForProperty({
+    soughtRole: 'property_owner',
     propertyId: dedupeProp.id,
     requireConfirmedLink: false,
   });

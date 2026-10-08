@@ -674,6 +674,45 @@ export function migrate() {
   db.exec(`CREATE INDEX IF NOT EXISTS idx_opp_disposition ON opportunities(disposition)`);
   db.exec(`CREATE INDEX IF NOT EXISTS idx_opp_group ON opportunities(group_id)`);
 
+  // Phase 6 — channel suppressions + contact match evidence (fixture/sandbox only under hard spend lock)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS contact_suppressions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      channel TEXT NOT NULL,
+      value_normalized TEXT NOT NULL,
+      full_name TEXT NOT NULL DEFAULT '',
+      reason TEXT NOT NULL DEFAULT '',
+      scope TEXT NOT NULL DEFAULT 'workspace',
+      property_id INTEGER REFERENCES properties(id) ON DELETE CASCADE,
+      opportunity_id INTEGER REFERENCES opportunities(id) ON DELETE SET NULL,
+      property_id_key INTEGER NOT NULL DEFAULT 0,
+      created_by TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(channel, value_normalized, scope, property_id_key)
+    );
+  `);
+  addColumn('contacts', 'sought_role', "sought_role TEXT NOT NULL DEFAULT ''");
+  addColumn('contacts', 'match_evidence_json', "match_evidence_json TEXT NOT NULL DEFAULT '{}'");
+  addColumn('contacts', 'entity_kind', "entity_kind TEXT NOT NULL DEFAULT 'unknown'");
+  addColumn('contacts', 'opportunity_id', 'opportunity_id INTEGER');
+  addColumn('contact_jobs', 'sought_role', "sought_role TEXT NOT NULL DEFAULT ''");
+  addColumn('contact_jobs', 'opportunity_id', 'opportunity_id INTEGER');
+  if (!db.prepare("SELECT value FROM settings WHERE key = 'tracerfy_hard_spend_lock'").get()) {
+    db.prepare(
+      `INSERT INTO settings(key, value) VALUES ('tracerfy_hard_spend_lock', '1')
+       ON CONFLICT(key) DO NOTHING`
+    ).run();
+    // Default hard lock: production off, spend cap 0 (do not overwrite an explicit later unlock in tests)
+    db.prepare(
+      `INSERT INTO settings(key, value) VALUES ('tracerfy_production_enabled', '0')
+       ON CONFLICT(key) DO NOTHING`
+    ).run();
+    db.prepare(
+      `INSERT INTO settings(key, value) VALUES ('tracerfy_spend_limit_credits', '0')
+       ON CONFLICT(key) DO NOTHING`
+    ).run();
+  }
+
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_lot_stable ON lot_groups(stable_key) WHERE stable_key != ''`);
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_property_identity ON properties(identity_key) WHERE identity_key != ''`);
   db.exec(`

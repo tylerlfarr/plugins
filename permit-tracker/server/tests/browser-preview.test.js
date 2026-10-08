@@ -106,6 +106,7 @@ test('invented sandbox_demo property gets labeled demo contacts; export excludes
     assert.match(created.data.property.site_address, /Invented Demo/i);
 
     const result = await findContactsForProperty({
+    soughtRole: 'property_owner',
       propertyId: created.data.property.id,
       permitRecordId: permitId,
     });
