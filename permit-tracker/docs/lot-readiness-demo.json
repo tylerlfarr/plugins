@@ -1,0 +1,147 @@
+{
+  "title": "Daily lot-readiness demo",
+  "source": "/cursor/stores/self/internal/Permit_Tracker_9.1.2026.xlsx",
+  "counts": {
+    "ready": 70,
+    "blocked": 218,
+    "needs_verification": 5,
+    "total": 293
+  },
+  "attentionByKind": {
+    "readiness_blocked": 218,
+    "unresolved_matching": 22,
+    "needs_verification": 5,
+    "revision_impact": 2,
+    "approaching_start": 2
+  },
+  "morningList": [
+    {
+      "project": "QUE2",
+      "community": "temporary",
+      "lot": "Sales Office /Trailer",
+      "official_id": "BLD2025-05425",
+      "readiness": "blocked",
+      "target_start": "2025-06-01",
+      "days_to_start": -490,
+      "outstanding": [
+        "StartSheet Distributed"
+      ],
+      "gaps": [
+        "Official status unverified"
+      ],
+      "summary": "Target start 2025-06-01 (490d past) · Blocked: StartSheet Distributed"
+    },
+    {
+      "project": "QUE2",
+      "community": "temporary",
+      "lot": "Sales Office /Trailer",
+      "official_id": "BPR2025-02088",
+      "readiness": "blocked",
+      "target_start": "2025-06-01",
+      "days_to_start": -490,
+      "outstanding": [
+        "StartSheet Distributed"
+      ],
+      "gaps": [
+        "Official status unverified"
+      ],
+      "summary": "Target start 2025-06-01 (490d past) · Blocked: StartSheet Distributed"
+    },
+    {
+      "project": "PLS2",
+      "community": "Potomac Shores 2/2",
+      "lot": "101-110",
+      "official_id": null,
+      "readiness": "blocked",
+      "target_start": "2026-02-01",
+      "days_to_start": -245,
+      "outstanding": [
+        "Permit Ordered",
+        "PW W/S Requested",
+        "Permit Received",
+        "Water & Sewer Paid",
+        "StartSheet Distributed"
+      ],
+      "gaps": [],
+      "summary": "Target start 2026-02-01 (245d past) · Blocked: Permit Ordered, PW W/S Requested, Permit Received"
+    },
+    {
+      "project": "BSO1",
+      "community": "Bradley South TH",
+      "lot": "86-90",
+      "official_id": null,
+      "readiness": "blocked",
+      "target_start": "2026-11-01",
+      "days_to_start": 28,
+      "outstanding": [
+        "Permit Ordered"
+      ],
+      "gaps": [],
+      "summary": "Target start 2026-11-01 (in 28d) · Blocked: Permit Ordered"
+    },
+    {
+      "project": "BSO1",
+      "community": "Bradley South TH",
+      "lot": "81-85",
+      "official_id": null,
+      "readiness": "blocked",
+      "target_start": "2026-11-15",
+      "days_to_start": 42,
+      "outstanding": [
+        "Permit Ordered"
+      ],
+      "gaps": [],
+      "summary": "Target start 2026-11-15 (in 42d) · Blocked: Permit Ordered"
+    },
+    {
+      "project": "QUW1",
+      "community": "Quartz West TH",
+      "lot": "18",
+      "official_id": null,
+      "readiness": "blocked",
+      "target_start": "2026-11-19",
+      "days_to_start": 46,
+      "outstanding": [
+        "PW Sewer Requested"
+      ],
+      "gaps": [],
+      "summary": "Target start 2026-11-19 (in 46d) · Blocked: PW Sewer Requested"
+    },
+    {
+      "project": "PLS2",
+      "community": "Potomac Shores 2/2",
+      "lot": "129-142",
+      "official_id": null,
+      "readiness": "blocked",
+      "target_start": "2026-12-01",
+      "days_to_start": 58,
+      "outstanding": [
+        "Permit Ordered",
+        "Permit Received",
+        "StartSheet Distributed"
+      ],
+      "gaps": [],
+      "summary": "Target start 2026-12-01 (in 58d) · Blocked: Permit Ordered, Permit Received, StartSheet Distributed"
+    },
+    {
+      "project": "CAM2",
+      "community": "HARD COPY SUBMISSIONS FOR LOCO",
+      "lot": "27-36 (M4)",
+      "official_id": null,
+      "readiness": "blocked",
+      "target_start": "2026-12-15",
+      "days_to_start": 72,
+      "outstanding": [
+        "Permit Received"
+      ],
+      "gaps": [],
+      "summary": "Target start 2026-12-15 (in 72d) · Blocked: Permit Received"
+    }
+  ],
+  "operatorNotes": [
+    "Ready = all configured workbook prerequisites satisfied/waived under rules.",
+    "Blocked = outstanding date/status evidence (blank section columns or APPLY/rqst).",
+    "Needs verification = ambiguous text, open revision impact, or AHJ automation gap.",
+    "Open revisions flag lots for review — do not auto-declare permits invalid."
+  ]
+}

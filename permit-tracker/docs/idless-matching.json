@@ -1,0 +1,117 @@
+{
+  "generatedAt": "2026-10-04T20:05:22.359Z",
+  "workbook": "/cursor/stores/self/internal/Permit_Tracker_9.1.2026.xlsx",
+  "importSummary": {
+    "sections": 24,
+    "lot_groups": 281,
+    "permits_created": 293,
+    "permits_updated": 3,
+    "official_ids": 22,
+    "revisions": 2,
+    "masterfile": 18,
+    "mst_ids": 52,
+    "reviews": 5,
+    "conflicts": 0,
+    "archived_rows": 135,
+    "multi_records": 20
+  },
+  "signals": {
+    "total_idless": 271,
+    "with_lot_label": 268,
+    "with_lot_range": 139,
+    "with_housetype": 131,
+    "with_notes": 10,
+    "with_street_like_notes": 0,
+    "with_parcel_like": 0
+  },
+  "lotLabelNotUnique": [
+    {
+      "lot_label": "28",
+      "communities": 3,
+      "rows": 4
+    },
+    {
+      "lot_label": "39",
+      "communities": 3,
+      "rows": 3
+    },
+    {
+      "lot_label": "38",
+      "communities": 3,
+      "rows": 3
+    },
+    {
+      "lot_label": "37",
+      "communities": 3,
+      "rows": 3
+    },
+    {
+      "lot_label": "36",
+      "communities": 3,
+      "rows": 3
+    },
+    {
+      "lot_label": "35",
+      "communities": 3,
+      "rows": 3
+    },
+    {
+      "lot_label": "34",
+      "communities": 3,
+      "rows": 3
+    },
+    {
+      "lot_label": "33",
+      "communities": 3,
+      "rows": 3
+    },
+    {
+      "lot_label": "3",
+      "communities": 3,
+      "rows": 3
+    },
+    {
+      "lot_label": "2",
+      "communities": 3,
+      "rows": 3
+    },
+    {
+      "lot_label": "(no lot)",
+      "communities": 3,
+      "rows": 3
+    },
+    {
+      "lot_label": "Lot",
+      "communities": 2,
+      "rows": 2
+    },
+    {
+      "lot_label": "86-90",
+      "communities": 2,
+      "rows": 2
+    },
+    {
+      "lot_label": "81-85",
+      "communities": 2,
+      "rows": 2
+    },
+    {
+      "lot_label": "47-52",
+      "communities": 2,
+      "rows": 2
+    }
+  ],
+  "candidateStrategiesTried": [
+    "masterfile_neighborhood_unique (low confidence, review only)",
+    "masterfile_neighborhood_ambiguous",
+    "mst_context_mention (explicitly not auto-linked)"
+  ],
+  "candidatesStored": 21,
+  "acceptedMatches": 0,
+  "minimalAdditionalInputNeeded": [
+    "Site address or GPIN/parcel for official portal search",
+    "Operator-confirmed AHJ per record type (town vs county)",
+    "Authorized company system export if addresses live only in internal tools"
+  ],
+  "conclusion": "Workbook ID-less rows have community + lot/range + housetype + occasional notes. Lot alone is not unique. No public search can reconstruct missing addresses/parcels. No accepted automatic matches this milestone; MST never auto-associated."
+}

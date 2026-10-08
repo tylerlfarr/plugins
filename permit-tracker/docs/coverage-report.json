@@ -1,0 +1,692 @@
+{
+  "generatedAt": "2026-10-04T20:05:20.803Z",
+  "workbook": "/cursor/stores/self/internal/Permit_Tracker_9.1.2026.xlsx",
+  "exclusions": {
+    "demo_fixture_injected_permits": 0,
+    "note": "Import-origin only. Fixtures, demo/test probes, and controlled change-detection injections excluded."
+  },
+  "entityCounts": {
+    "sheets_in_workbook": [
+      "Permit Tracker",
+      "Masterfile Plan Tracker",
+      "WHSD Masterfile",
+      "Permit Revisions",
+      "Indirect Cost",
+      "MST's",
+      "2018 IRC Tracker",
+      "Corewall Alternative Tracker"
+    ],
+    "community_sections": 24,
+    "lot_groups": 281,
+    "permit_records": 293,
+    "with_official_id": 22,
+    "without_official_id": 271,
+    "revisions": 2,
+    "masterfile": 18,
+    "mst_ids": 52,
+    "multi_record_rows": 20,
+    "match_reviews": 5
+  },
+  "jurisdictionNote": "Utility/geography headers suggest county only; jurisdiction_confirmed=0 until operator confirms AHJ per record type.",
+  "jurisdictionBreakdown": [
+    {
+      "jurisdiction_code": "prince_william_county",
+      "jurisdiction_source": "utility_geography_suggestion",
+      "jurisdiction_confirmed": 0,
+      "c": 198
+    },
+    {
+      "jurisdiction_code": "prince_william_county",
+      "jurisdiction_source": "project_code_suggestion",
+      "jurisdiction_confirmed": 0,
+      "c": 46
+    },
+    {
+      "jurisdiction_code": "loudoun_county",
+      "jurisdiction_source": "utility_geography_suggestion",
+      "jurisdiction_confirmed": 0,
+      "c": 33
+    },
+    {
+      "jurisdiction_code": "unresolved",
+      "jurisdiction_source": "unresolved",
+      "jurisdiction_confirmed": 0,
+      "c": 16
+    }
+  ],
+  "workbookIdsAttemptedByJurisdiction": {
+    "loudoun_county": [
+      "BLDC-2026-013456",
+      "BLDC-2026-018839",
+      "BLDC-2026-029826",
+      "BLDC-2026-040694",
+      "BLDC-2026-040699",
+      "ZONC-2026-016733"
+    ],
+    "prince_william_county": [
+      "BLD2025-05425",
+      "BLD2026-02569",
+      "BLD2026-02813",
+      "BLD2026-02814",
+      "BLD2026-02815",
+      "BLD2026-02989",
+      "BLD2026-02990",
+      "BLD2026-04765",
+      "BPR2025-02088",
+      "ZNA2026-02608",
+      "ZNA2026-02610",
+      "ZNA2026-02611",
+      "ZNA2026-02612",
+      "ZNA2026-02853",
+      "ZNA2026-02854",
+      "ZNA2026-04510"
+    ]
+  },
+  "liveMatches": {
+    "count": 0,
+    "results": [],
+    "note": "Baselines only — no injected later changes counted as observed government transitions"
+  },
+  "attempts": [
+    {
+      "official_id": "BLDC-2026-013456",
+      "jurisdiction_code": "loudoun_county",
+      "jurisdiction_source": "utility_geography_suggestion",
+      "jurisdiction_confirmed": 0,
+      "outcome": "unavailable",
+      "mode": "none",
+      "native": null,
+      "error": "Loudoun County, VA has no verified read-only connector in this build",
+      "usefulFields": [],
+      "connectorStatus": "unsupported"
+    },
+    {
+      "official_id": "BLDC-2026-018839",
+      "jurisdiction_code": "loudoun_county",
+      "jurisdiction_source": "utility_geography_suggestion",
+      "jurisdiction_confirmed": 0,
+      "outcome": "unavailable",
+      "mode": "none",
+      "native": null,
+      "error": "Loudoun County, VA has no verified read-only connector in this build",
+      "usefulFields": [],
+      "connectorStatus": "unsupported"
+    },
+    {
+      "official_id": "BLDC-2026-029826",
+      "jurisdiction_code": "loudoun_county",
+      "jurisdiction_source": "utility_geography_suggestion",
+      "jurisdiction_confirmed": 0,
+      "outcome": "unavailable",
+      "mode": "none",
+      "native": null,
+      "error": "Loudoun County, VA has no verified read-only connector in this build",
+      "usefulFields": [],
+      "connectorStatus": "unsupported"
+    },
+    {
+      "official_id": "BLDC-2026-040694",
+      "jurisdiction_code": "loudoun_county",
+      "jurisdiction_source": "utility_geography_suggestion",
+      "jurisdiction_confirmed": 0,
+      "outcome": "unavailable",
+      "mode": "none",
+      "native": null,
+      "error": "Loudoun County, VA has no verified read-only connector in this build",
+      "usefulFields": [],
+      "connectorStatus": "unsupported"
+    },
+    {
+      "official_id": "BLDC-2026-040699",
+      "jurisdiction_code": "loudoun_county",
+      "jurisdiction_source": "utility_geography_suggestion",
+      "jurisdiction_confirmed": 0,
+      "outcome": "unavailable",
+      "mode": "none",
+      "native": null,
+      "error": "Loudoun County, VA has no verified read-only connector in this build",
+      "usefulFields": [],
+      "connectorStatus": "unsupported"
+    },
+    {
+      "official_id": "ZONC-2026-016733",
+      "jurisdiction_code": "loudoun_county",
+      "jurisdiction_source": "utility_geography_suggestion",
+      "jurisdiction_confirmed": 0,
+      "outcome": "unavailable",
+      "mode": "none",
+      "native": null,
+      "error": "Loudoun County, VA has no verified read-only connector in this build",
+      "usefulFields": [],
+      "connectorStatus": "unsupported"
+    },
+    {
+      "official_id": "BLD2025-05425",
+      "jurisdiction_code": "prince_william_county",
+      "jurisdiction_source": "utility_geography_suggestion",
+      "jurisdiction_confirmed": 0,
+      "outcome": "unavailable",
+      "mode": "none",
+      "native": null,
+      "error": "Prince William County, VA has no verified read-only connector in this build",
+      "usefulFields": [],
+      "connectorStatus": "unsupported"
+    },
+    {
+      "official_id": "BLD2026-02569",
+      "jurisdiction_code": "prince_william_county",
+      "jurisdiction_source": "utility_geography_suggestion",
+      "jurisdiction_confirmed": 0,
+      "outcome": "unavailable",
+      "mode": "none",
+      "native": null,
+      "error": "Prince William County, VA has no verified read-only connector in this build",
+      "usefulFields": [],
+      "connectorStatus": "unsupported"
+    },
+    {
+      "official_id": "BLD2026-02813",
+      "jurisdiction_code": "prince_william_county",
+      "jurisdiction_source": "utility_geography_suggestion",
+      "jurisdiction_confirmed": 0,
+      "outcome": "unavailable",
+      "mode": "none",
+      "native": null,
+      "error": "Prince William County, VA has no verified read-only connector in this build",
+      "usefulFields": [],
+      "connectorStatus": "unsupported"
+    },
+    {
+      "official_id": "BLD2026-02814",
+      "jurisdiction_code": "prince_william_county",
+      "jurisdiction_source": "utility_geography_suggestion",
+      "jurisdiction_confirmed": 0,
+      "outcome": "unavailable",
+      "mode": "none",
+      "native": null,
+      "error": "Prince William County, VA has no verified read-only connector in this build",
+      "usefulFields": [],
+      "connectorStatus": "unsupported"
+    },
+    {
+      "official_id": "BLD2026-02815",
+      "jurisdiction_code": "prince_william_county",
+      "jurisdiction_source": "utility_geography_suggestion",
+      "jurisdiction_confirmed": 0,
+      "outcome": "unavailable",
+      "mode": "none",
+      "native": null,
+      "error": "Prince William County, VA has no verified read-only connector in this build",
+      "usefulFields": [],
+      "connectorStatus": "unsupported"
+    },
+    {
+      "official_id": "BLD2026-02989",
+      "jurisdiction_code": "prince_william_county",
+      "jurisdiction_source": "utility_geography_suggestion",
+      "jurisdiction_confirmed": 0,
+      "outcome": "unavailable",
+      "mode": "none",
+      "native": null,
+      "error": "Prince William County, VA has no verified read-only connector in this build",
+      "usefulFields": [],
+      "connectorStatus": "unsupported"
+    },
+    {
+      "official_id": "BLD2026-02990",
+      "jurisdiction_code": "prince_william_county",
+      "jurisdiction_source": "utility_geography_suggestion",
+      "jurisdiction_confirmed": 0,
+      "outcome": "unavailable",
+      "mode": "none",
+      "native": null,
+      "error": "Prince William County, VA has no verified read-only connector in this build",
+      "usefulFields": [],
+      "connectorStatus": "unsupported"
+    },
+    {
+      "official_id": "BLD2026-04765",
+      "jurisdiction_code": "prince_william_county",
+      "jurisdiction_source": "utility_geography_suggestion",
+      "jurisdiction_confirmed": 0,
+      "outcome": "unavailable",
+      "mode": "none",
+      "native": null,
+      "error": "Prince William County, VA has no verified read-only connector in this build",
+      "usefulFields": [],
+      "connectorStatus": "unsupported"
+    },
+    {
+      "official_id": "BPR2025-02088",
+      "jurisdiction_code": "prince_william_county",
+      "jurisdiction_source": "utility_geography_suggestion",
+      "jurisdiction_confirmed": 0,
+      "outcome": "unavailable",
+      "mode": "none",
+      "native": null,
+      "error": "Prince William County, VA has no verified read-only connector in this build",
+      "usefulFields": [],
+      "connectorStatus": "unsupported"
+    },
+    {
+      "official_id": "ZNA2026-02608",
+      "jurisdiction_code": "prince_william_county",
+      "jurisdiction_source": "utility_geography_suggestion",
+      "jurisdiction_confirmed": 0,
+      "outcome": "unavailable",
+      "mode": "none",
+      "native": null,
+      "error": "Prince William County, VA has no verified read-only connector in this build",
+      "usefulFields": [],
+      "connectorStatus": "unsupported"
+    },
+    {
+      "official_id": "ZNA2026-02610",
+      "jurisdiction_code": "prince_william_county",
+      "jurisdiction_source": "utility_geography_suggestion",
+      "jurisdiction_confirmed": 0,
+      "outcome": "unavailable",
+      "mode": "none",
+      "native": null,
+      "error": "Prince William County, VA has no verified read-only connector in this build",
+      "usefulFields": [],
+      "connectorStatus": "unsupported"
+    },
+    {
+      "official_id": "ZNA2026-02611",
+      "jurisdiction_code": "prince_william_county",
+      "jurisdiction_source": "utility_geography_suggestion",
+      "jurisdiction_confirmed": 0,
+      "outcome": "unavailable",
+      "mode": "none",
+      "native": null,
+      "error": "Prince William County, VA has no verified read-only connector in this build",
+      "usefulFields": [],
+      "connectorStatus": "unsupported"
+    },
+    {
+      "official_id": "ZNA2026-02612",
+      "jurisdiction_code": "prince_william_county",
+      "jurisdiction_source": "utility_geography_suggestion",
+      "jurisdiction_confirmed": 0,
+      "outcome": "unavailable",
+      "mode": "none",
+      "native": null,
+      "error": "Prince William County, VA has no verified read-only connector in this build",
+      "usefulFields": [],
+      "connectorStatus": "unsupported"
+    },
+    {
+      "official_id": "ZNA2026-02853",
+      "jurisdiction_code": "prince_william_county",
+      "jurisdiction_source": "utility_geography_suggestion",
+      "jurisdiction_confirmed": 0,
+      "outcome": "unavailable",
+      "mode": "none",
+      "native": null,
+      "error": "Prince William County, VA has no verified read-only connector in this build",
+      "usefulFields": [],
+      "connectorStatus": "unsupported"
+    },
+    {
+      "official_id": "ZNA2026-02854",
+      "jurisdiction_code": "prince_william_county",
+      "jurisdiction_source": "utility_geography_suggestion",
+      "jurisdiction_confirmed": 0,
+      "outcome": "unavailable",
+      "mode": "none",
+      "native": null,
+      "error": "Prince William County, VA has no verified read-only connector in this build",
+      "usefulFields": [],
+      "connectorStatus": "unsupported"
+    },
+    {
+      "official_id": "ZNA2026-04510",
+      "jurisdiction_code": "prince_william_county",
+      "jurisdiction_source": "utility_geography_suggestion",
+      "jurisdiction_confirmed": 0,
+      "outcome": "unavailable",
+      "mode": "none",
+      "native": null,
+      "error": "Prince William County, VA has no verified read-only connector in this build",
+      "usefulFields": [],
+      "connectorStatus": "unsupported"
+    }
+  ],
+  "unsupported": {
+    "count": 22,
+    "reasons": [
+      "Loudoun County, VA has no verified read-only connector in this build",
+      "Prince William County, VA has no verified read-only connector in this build"
+    ],
+    "results": [
+      {
+        "official_id": "BLDC-2026-013456",
+        "jurisdiction_code": "loudoun_county",
+        "jurisdiction_source": "utility_geography_suggestion",
+        "jurisdiction_confirmed": 0,
+        "outcome": "unavailable",
+        "mode": "none",
+        "native": null,
+        "error": "Loudoun County, VA has no verified read-only connector in this build",
+        "usefulFields": [],
+        "connectorStatus": "unsupported"
+      },
+      {
+        "official_id": "BLDC-2026-018839",
+        "jurisdiction_code": "loudoun_county",
+        "jurisdiction_source": "utility_geography_suggestion",
+        "jurisdiction_confirmed": 0,
+        "outcome": "unavailable",
+        "mode": "none",
+        "native": null,
+        "error": "Loudoun County, VA has no verified read-only connector in this build",
+        "usefulFields": [],
+        "connectorStatus": "unsupported"
+      },
+      {
+        "official_id": "BLDC-2026-029826",
+        "jurisdiction_code": "loudoun_county",
+        "jurisdiction_source": "utility_geography_suggestion",
+        "jurisdiction_confirmed": 0,
+        "outcome": "unavailable",
+        "mode": "none",
+        "native": null,
+        "error": "Loudoun County, VA has no verified read-only connector in this build",
+        "usefulFields": [],
+        "connectorStatus": "unsupported"
+      },
+      {
+        "official_id": "BLDC-2026-040694",
+        "jurisdiction_code": "loudoun_county",
+        "jurisdiction_source": "utility_geography_suggestion",
+        "jurisdiction_confirmed": 0,
+        "outcome": "unavailable",
+        "mode": "none",
+        "native": null,
+        "error": "Loudoun County, VA has no verified read-only connector in this build",
+        "usefulFields": [],
+        "connectorStatus": "unsupported"
+      },
+      {
+        "official_id": "BLDC-2026-040699",
+        "jurisdiction_code": "loudoun_county",
+        "jurisdiction_source": "utility_geography_suggestion",
+        "jurisdiction_confirmed": 0,
+        "outcome": "unavailable",
+        "mode": "none",
+        "native": null,
+        "error": "Loudoun County, VA has no verified read-only connector in this build",
+        "usefulFields": [],
+        "connectorStatus": "unsupported"
+      },
+      {
+        "official_id": "ZONC-2026-016733",
+        "jurisdiction_code": "loudoun_county",
+        "jurisdiction_source": "utility_geography_suggestion",
+        "jurisdiction_confirmed": 0,
+        "outcome": "unavailable",
+        "mode": "none",
+        "native": null,
+        "error": "Loudoun County, VA has no verified read-only connector in this build",
+        "usefulFields": [],
+        "connectorStatus": "unsupported"
+      },
+      {
+        "official_id": "BLD2025-05425",
+        "jurisdiction_code": "prince_william_county",
+        "jurisdiction_source": "utility_geography_suggestion",
+        "jurisdiction_confirmed": 0,
+        "outcome": "unavailable",
+        "mode": "none",
+        "native": null,
+        "error": "Prince William County, VA has no verified read-only connector in this build",
+        "usefulFields": [],
+        "connectorStatus": "unsupported"
+      },
+      {
+        "official_id": "BLD2026-02569",
+        "jurisdiction_code": "prince_william_county",
+        "jurisdiction_source": "utility_geography_suggestion",
+        "jurisdiction_confirmed": 0,
+        "outcome": "unavailable",
+        "mode": "none",
+        "native": null,
+        "error": "Prince William County, VA has no verified read-only connector in this build",
+        "usefulFields": [],
+        "connectorStatus": "unsupported"
+      },
+      {
+        "official_id": "BLD2026-02813",
+        "jurisdiction_code": "prince_william_county",
+        "jurisdiction_source": "utility_geography_suggestion",
+        "jurisdiction_confirmed": 0,
+        "outcome": "unavailable",
+        "mode": "none",
+        "native": null,
+        "error": "Prince William County, VA has no verified read-only connector in this build",
+        "usefulFields": [],
+        "connectorStatus": "unsupported"
+      },
+      {
+        "official_id": "BLD2026-02814",
+        "jurisdiction_code": "prince_william_county",
+        "jurisdiction_source": "utility_geography_suggestion",
+        "jurisdiction_confirmed": 0,
+        "outcome": "unavailable",
+        "mode": "none",
+        "native": null,
+        "error": "Prince William County, VA has no verified read-only connector in this build",
+        "usefulFields": [],
+        "connectorStatus": "unsupported"
+      },
+      {
+        "official_id": "BLD2026-02815",
+        "jurisdiction_code": "prince_william_county",
+        "jurisdiction_source": "utility_geography_suggestion",
+        "jurisdiction_confirmed": 0,
+        "outcome": "unavailable",
+        "mode": "none",
+        "native": null,
+        "error": "Prince William County, VA has no verified read-only connector in this build",
+        "usefulFields": [],
+        "connectorStatus": "unsupported"
+      },
+      {
+        "official_id": "BLD2026-02989",
+        "jurisdiction_code": "prince_william_county",
+        "jurisdiction_source": "utility_geography_suggestion",
+        "jurisdiction_confirmed": 0,
+        "outcome": "unavailable",
+        "mode": "none",
+        "native": null,
+        "error": "Prince William County, VA has no verified read-only connector in this build",
+        "usefulFields": [],
+        "connectorStatus": "unsupported"
+      },
+      {
+        "official_id": "BLD2026-02990",
+        "jurisdiction_code": "prince_william_county",
+        "jurisdiction_source": "utility_geography_suggestion",
+        "jurisdiction_confirmed": 0,
+        "outcome": "unavailable",
+        "mode": "none",
+        "native": null,
+        "error": "Prince William County, VA has no verified read-only connector in this build",
+        "usefulFields": [],
+        "connectorStatus": "unsupported"
+      },
+      {
+        "official_id": "BLD2026-04765",
+        "jurisdiction_code": "prince_william_county",
+        "jurisdiction_source": "utility_geography_suggestion",
+        "jurisdiction_confirmed": 0,
+        "outcome": "unavailable",
+        "mode": "none",
+        "native": null,
+        "error": "Prince William County, VA has no verified read-only connector in this build",
+        "usefulFields": [],
+        "connectorStatus": "unsupported"
+      },
+      {
+        "official_id": "BPR2025-02088",
+        "jurisdiction_code": "prince_william_county",
+        "jurisdiction_source": "utility_geography_suggestion",
+        "jurisdiction_confirmed": 0,
+        "outcome": "unavailable",
+        "mode": "none",
+        "native": null,
+        "error": "Prince William County, VA has no verified read-only connector in this build",
+        "usefulFields": [],
+        "connectorStatus": "unsupported"
+      },
+      {
+        "official_id": "ZNA2026-02608",
+        "jurisdiction_code": "prince_william_county",
+        "jurisdiction_source": "utility_geography_suggestion",
+        "jurisdiction_confirmed": 0,
+        "outcome": "unavailable",
+        "mode": "none",
+        "native": null,
+        "error": "Prince William County, VA has no verified read-only connector in this build",
+        "usefulFields": [],
+        "connectorStatus": "unsupported"
+      },
+      {
+        "official_id": "ZNA2026-02610",
+        "jurisdiction_code": "prince_william_county",
+        "jurisdiction_source": "utility_geography_suggestion",
+        "jurisdiction_confirmed": 0,
+        "outcome": "unavailable",
+        "mode": "none",
+        "native": null,
+        "error": "Prince William County, VA has no verified read-only connector in this build",
+        "usefulFields": [],
+        "connectorStatus": "unsupported"
+      },
+      {
+        "official_id": "ZNA2026-02611",
+        "jurisdiction_code": "prince_william_county",
+        "jurisdiction_source": "utility_geography_suggestion",
+        "jurisdiction_confirmed": 0,
+        "outcome": "unavailable",
+        "mode": "none",
+        "native": null,
+        "error": "Prince William County, VA has no verified read-only connector in this build",
+        "usefulFields": [],
+        "connectorStatus": "unsupported"
+      },
+      {
+        "official_id": "ZNA2026-02612",
+        "jurisdiction_code": "prince_william_county",
+        "jurisdiction_source": "utility_geography_suggestion",
+        "jurisdiction_confirmed": 0,
+        "outcome": "unavailable",
+        "mode": "none",
+        "native": null,
+        "error": "Prince William County, VA has no verified read-only connector in this build",
+        "usefulFields": [],
+        "connectorStatus": "unsupported"
+      },
+      {
+        "official_id": "ZNA2026-02853",
+        "jurisdiction_code": "prince_william_county",
+        "jurisdiction_source": "utility_geography_suggestion",
+        "jurisdiction_confirmed": 0,
+        "outcome": "unavailable",
+        "mode": "none",
+        "native": null,
+        "error": "Prince William County, VA has no verified read-only connector in this build",
+        "usefulFields": [],
+        "connectorStatus": "unsupported"
+      },
+      {
+        "official_id": "ZNA2026-02854",
+        "jurisdiction_code": "prince_william_county",
+        "jurisdiction_source": "utility_geography_suggestion",
+        "jurisdiction_confirmed": 0,
+        "outcome": "unavailable",
+        "mode": "none",
+        "native": null,
+        "error": "Prince William County, VA has no verified read-only connector in this build",
+        "usefulFields": [],
+        "connectorStatus": "unsupported"
+      },
+      {
+        "official_id": "ZNA2026-04510",
+        "jurisdiction_code": "prince_william_county",
+        "jurisdiction_source": "utility_geography_suggestion",
+        "jurisdiction_confirmed": 0,
+        "outcome": "unavailable",
+        "mode": "none",
+        "native": null,
+        "error": "Prince William County, VA has no verified read-only connector in this build",
+        "usefulFields": [],
+        "connectorStatus": "unsupported"
+      }
+    ]
+  },
+  "idless": {
+    "count": 271,
+    "acceptedMatches": 0,
+    "see": "docs/idless-matching.md"
+  },
+  "registry": [
+    {
+      "key": "fairfax_county_building_records_plus",
+      "jurisdiction_code": "fairfax_county",
+      "state": "verified",
+      "activated": 0,
+      "adapter_type": "fairfax_plus"
+    },
+    {
+      "key": "pwc_gis_use_permits",
+      "jurisdiction_code": "prince_william_county",
+      "state": "verified",
+      "activated": 0,
+      "adapter_type": "arcgis_generic"
+    },
+    {
+      "key": "loudoun_res_building_permits_issued",
+      "jurisdiction_code": "loudoun_county",
+      "state": "needs_review",
+      "activated": 0,
+      "adapter_type": "arcgis_generic"
+    },
+    {
+      "key": "loudoun_issued_permit_reports",
+      "jurisdiction_code": "loudoun_county",
+      "state": "discovered",
+      "activated": 0,
+      "adapter_type": "none"
+    },
+    {
+      "key": "pwc_gis_planning_pending",
+      "jurisdiction_code": "prince_william_county",
+      "state": "discovered",
+      "activated": 0,
+      "adapter_type": "arcgis_generic"
+    },
+    {
+      "key": "loudoun_landmarc_guids_table",
+      "jurisdiction_code": "loudoun_county",
+      "state": "unsupported",
+      "activated": 0,
+      "adapter_type": "arcgis_generic"
+    },
+    {
+      "key": "loudoun_landmarc_portal",
+      "jurisdiction_code": "loudoun_county",
+      "state": "unsupported",
+      "activated": 0,
+      "adapter_type": "none"
+    },
+    {
+      "key": "pwc_eportal_energov",
+      "jurisdiction_code": "prince_william_county",
+      "state": "unsupported",
+      "activated": 0,
+      "adapter_type": "none"
+    }
+  ]
+}

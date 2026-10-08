@@ -1,0 +1,34 @@
+{
+  "label": "Live lookup plus controlled change-detection test",
+  "notObservedGovernmentTransition": true,
+  "recordOrigin": "demo",
+  "excludedFromOperationalCoverage": true,
+  "liveId": "ALTC-2026-00970",
+  "liveLookup": {
+    "outcome": "updated",
+    "mode": "live",
+    "baseline": true,
+    "officialStatusAfter": {
+      "official_status": "issued",
+      "source_native_status": "Issued"
+    }
+  },
+  "controlledChangeDetectionTest": {
+    "injectedLocalStatus": "in_review",
+    "note": "Local official_status flipped before re-query to exercise change-detection — not an observed AHJ transition",
+    "outcome": "updated",
+    "mode": "live"
+  },
+  "internalPreserved": true,
+  "readiness": "verified_ready",
+  "attention": [
+    {
+      "kind": "status_change",
+      "message": "Official status: in_review → issued (ALTC-2026-00970)"
+    }
+  ],
+  "eliminatesWhenActivatedOnImportRecords": [
+    "Manual Fairfax PLUS lookup for linked RECORDIDs",
+    "Hand-copying Issued/status into a side tracker"
+  ]
+}

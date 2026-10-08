@@ -1,0 +1,817 @@
+import Database from 'better-sqlite3';
+import fs from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const defaultDataDir = path.join(__dirname, '..', 'data');
+
+/**
+ * Resolve SQLite path once. PERMIT_DB_PATH wins when set (absolute or relative to cwd).
+ * Never silently falls back to another file if the configured path is unusable.
+ */
+function resolveDbPath() {
+  if (process.env.PERMIT_DB_PATH) {
+    return path.resolve(process.env.PERMIT_DB_PATH);
+  }
+  return path.join(defaultDataDir, 'permit-tracker.sqlite');
+}
+
+function ensureParentWritable(filePath) {
+  const parent = path.dirname(filePath);
+  try {
+    fs.mkdirSync(parent, { recursive: true });
+    fs.accessSync(parent, fs.constants.W_OK);
+  } catch (e) {
+    const err = new Error(
+      `Cannot use SQLite path "${filePath}": parent directory "${parent}" is missing or not writable (${e.message}). ` +
+        `Set PERMIT_DB_PATH to a writable location. Refusing to open or switch databases.`
+    );
+    err.code = 'PERMIT_DB_UNWRITABLE';
+    throw err;
+  }
+}
+
+const dbPath = resolveDbPath();
+ensureParentWritable(dbPath);
+
+export const db = new Database(dbPath);
+db.pragma('journal_mode = WAL');
+db.pragma('foreign_keys = ON');
+
+export function getDbPath() {
+  return dbPath;
+}
+
+export function getDataDir() {
+  return path.dirname(dbPath);
+}
+
+/** Lightweight readiness probe — does not expose the path. */
+export function dbIsReady() {
+  try {
+    db.prepare('SELECT 1 AS ok').get();
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function addColumn(table, column, ddl) {
+  const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+  if (!cols.includes(column)) {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+  }
+}
+
+export function migrate() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS settings (
+      key TEXT PRIMARY KEY,
+      value TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS community_sections (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_code TEXT NOT NULL,
+      community_name TEXT NOT NULL,
+      jurisdiction_code TEXT NOT NULL DEFAULT 'unresolved',
+      jurisdiction_source TEXT NOT NULL DEFAULT 'unresolved',
+      jurisdiction_confirmed INTEGER NOT NULL DEFAULT 0,
+      permit_time_note TEXT DEFAULT '',
+      header_json TEXT NOT NULL DEFAULT '[]',
+      source_sheet TEXT NOT NULL DEFAULT 'Permit Tracker',
+      source_header_row INTEGER,
+      record_origin TEXT NOT NULL DEFAULT 'import',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(project_code, community_name, source_sheet)
+    );
+
+    CREATE TABLE IF NOT EXISTS lot_groups (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      section_id INTEGER NOT NULL REFERENCES community_sections(id) ON DELETE CASCADE,
+      lot_label TEXT NOT NULL,
+      housetype TEXT DEFAULT '',
+      stable_key TEXT NOT NULL DEFAULT '',
+      source_row INTEGER,
+      notes_raw TEXT DEFAULT '',
+      record_origin TEXT NOT NULL DEFAULT 'import',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(section_id, lot_label, housetype)
+    );
+
+    CREATE TABLE IF NOT EXISTS permit_records (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      lot_group_id INTEGER NOT NULL REFERENCES lot_groups(id) ON DELETE CASCADE,
+      primary_official_id TEXT,
+      jurisdiction_code TEXT NOT NULL DEFAULT 'unresolved',
+      jurisdiction_source TEXT NOT NULL DEFAULT 'unresolved',
+      jurisdiction_confirmed INTEGER NOT NULL DEFAULT 0,
+      permit_kind TEXT DEFAULT 'building',
+      use_classification TEXT NOT NULL DEFAULT 'unknown',
+      use_classification_official TEXT NOT NULL DEFAULT 'unknown',
+      use_classification_official_label TEXT NOT NULL DEFAULT '',
+      use_classification_source TEXT NOT NULL DEFAULT 'unknown_default',
+      use_classification_manual TEXT,
+      use_classification_manual_by TEXT,
+      use_classification_manual_at TEXT,
+      source_native_status TEXT DEFAULT '',
+      official_status TEXT DEFAULT 'unknown',
+      internal_status TEXT NOT NULL DEFAULT 'watching',
+      readiness_state TEXT NOT NULL DEFAULT 'unknown_stale',
+      owner TEXT DEFAULT '',
+      next_action TEXT DEFAULT '',
+      next_action_due TEXT,
+      source_url TEXT DEFAULT '',
+      last_checked_at TEXT,
+      last_successful_check_at TEXT,
+      last_check_outcome TEXT DEFAULT 'never',
+      last_check_error TEXT DEFAULT '',
+      official_last_changed_at TEXT,
+      progress_anchor_at TEXT,
+      baseline_snapshot_at TEXT,
+      record_origin TEXT NOT NULL DEFAULT 'import',
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS official_ids (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      permit_record_id INTEGER NOT NULL REFERENCES permit_records(id) ON DELETE CASCADE,
+      official_id TEXT NOT NULL,
+      id_prefix TEXT,
+      jurisdiction_guess TEXT,
+      is_primary INTEGER NOT NULL DEFAULT 0,
+      extracted_from TEXT DEFAULT 'notes',
+      UNIQUE(permit_record_id, official_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS internal_milestones (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      permit_record_id INTEGER NOT NULL REFERENCES permit_records(id) ON DELETE CASCADE,
+      key TEXT NOT NULL,
+      label TEXT NOT NULL,
+      value TEXT,
+      value_kind TEXT NOT NULL DEFAULT 'text',
+      source TEXT NOT NULL DEFAULT 'import',
+      edited_in_app INTEGER NOT NULL DEFAULT 0,
+      last_import_value TEXT,
+      UNIQUE(permit_record_id, key)
+    );
+
+    CREATE TABLE IF NOT EXISTS official_snapshots (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      permit_record_id INTEGER NOT NULL REFERENCES permit_records(id) ON DELETE CASCADE,
+      official_id TEXT,
+      payload_json TEXT NOT NULL,
+      mode TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      is_baseline INTEGER NOT NULL DEFAULT 0,
+      checked_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS field_changes (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      permit_record_id INTEGER NOT NULL REFERENCES permit_records(id) ON DELETE CASCADE,
+      field TEXT NOT NULL,
+      old_value TEXT,
+      new_value TEXT,
+      changed_by TEXT NOT NULL DEFAULT 'system',
+      source TEXT NOT NULL DEFAULT 'ui',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS plan_tracker_rows (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      house_type TEXT,
+      product_name TEXT,
+      counties TEXT,
+      neighborhood TEXT,
+      date_requested TEXT,
+      date_ready TEXT,
+      date_submitted TEXT,
+      comments_received TEXT,
+      date_resubmitted TEXT,
+      date_approved TEXT,
+      notes TEXT,
+      official_ids_json TEXT DEFAULT '[]',
+      source_row INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS permit_revisions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      community_code TEXT,
+      lot TEXT,
+      revised_start_sheet TEXT,
+      date_submitted TEXT,
+      received_revised_permit TEXT,
+      reason TEXT,
+      comments TEXT,
+      source_row INTEGER
+    );
+
+    CREATE TABLE IF NOT EXISTS mst_reference_ids (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      jurisdiction_hint TEXT,
+      product_or_context TEXT,
+      official_id TEXT NOT NULL,
+      cell_text TEXT,
+      source_row INTEGER,
+      source_col TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS saved_filters (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL UNIQUE,
+      definition TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS match_reviews (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      jurisdiction_code TEXT,
+      candidate_official_id TEXT,
+      reason TEXT NOT NULL,
+      payload_json TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'pending',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS import_conflicts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      permit_record_id INTEGER REFERENCES permit_records(id) ON DELETE CASCADE,
+      field TEXT NOT NULL,
+      previous_import_value TEXT,
+      app_value TEXT,
+      incoming_value TEXT,
+      status TEXT NOT NULL DEFAULT 'pending',
+      resolution TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS attention_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      permit_record_id INTEGER REFERENCES permit_records(id) ON DELETE CASCADE,
+      kind TEXT NOT NULL,
+      message TEXT NOT NULL,
+      dedupe_key TEXT NOT NULL UNIQUE,
+      condition_key TEXT,
+      acknowledged INTEGER NOT NULL DEFAULT 0,
+      resolved_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS check_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      started_at TEXT NOT NULL,
+      finished_at TEXT,
+      trigger TEXT NOT NULL DEFAULT 'manual',
+      scope TEXT NOT NULL DEFAULT 'linked',
+      total INTEGER NOT NULL DEFAULT 0,
+      updated INTEGER NOT NULL DEFAULT 0,
+      no_change INTEGER NOT NULL DEFAULT 0,
+      not_found INTEGER NOT NULL DEFAULT 0,
+      unavailable INTEGER NOT NULL DEFAULT 0,
+      failed INTEGER NOT NULL DEFAULT 0,
+      skipped_demo INTEGER NOT NULL DEFAULT 0,
+      summary_json TEXT DEFAULT '{}'
+    );
+
+    CREATE TABLE IF NOT EXISTS schedule_config (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      enabled INTEGER NOT NULL DEFAULT 0,
+      interval_minutes INTEGER NOT NULL DEFAULT 360,
+      timeout_ms INTEGER NOT NULL DEFAULT 15000,
+      max_retries INTEGER NOT NULL DEFAULT 2,
+      backoff_ms INTEGER NOT NULL DEFAULT 2000,
+      last_preview_at TEXT,
+      notes TEXT DEFAULT 'Local schedule preview only — does not send digests'
+    );
+
+    CREATE TABLE IF NOT EXISTS import_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      filename TEXT NOT NULL,
+      summary_json TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS import_commit_keys (
+      content_hash TEXT PRIMARY KEY,
+      filename TEXT NOT NULL DEFAULT '',
+      summary_json TEXT NOT NULL,
+      permits_created INTEGER NOT NULL DEFAULT 0,
+      actor TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS archived_sheet_rows (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      sheet_name TEXT NOT NULL,
+      source_row INTEGER,
+      payload_json TEXT NOT NULL,
+      imported_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS source_registry (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      key TEXT NOT NULL UNIQUE,
+      jurisdiction_code TEXT NOT NULL,
+      agency TEXT NOT NULL DEFAULT '',
+      record_types TEXT NOT NULL DEFAULT '',
+      official_url TEXT NOT NULL DEFAULT '',
+      endpoint TEXT NOT NULL DEFAULT '',
+      platform TEXT NOT NULL DEFAULT '',
+      adapter_type TEXT NOT NULL DEFAULT 'none',
+      available_fields_json TEXT NOT NULL DEFAULT '{}',
+      auth_access TEXT NOT NULL DEFAULT '',
+      refresh_frequency TEXT NOT NULL DEFAULT 'unknown',
+      state TEXT NOT NULL DEFAULT 'discovered',
+      coverage_limitations TEXT NOT NULL DEFAULT '',
+      evidence TEXT NOT NULL DEFAULT '',
+      last_verified_at TEXT,
+      reusable INTEGER NOT NULL DEFAULT 1,
+      activated INTEGER NOT NULL DEFAULT 0,
+      activated_at TEXT,
+      activated_by TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS discovery_runs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      jurisdiction_code TEXT,
+      url TEXT NOT NULL,
+      result_json TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'discovered',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS idless_match_candidates (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      permit_record_id INTEGER REFERENCES permit_records(id) ON DELETE CASCADE,
+      strategy TEXT NOT NULL,
+      evidence_json TEXT NOT NULL,
+      confidence TEXT NOT NULL DEFAULT 'low',
+      status TEXT NOT NULL DEFAULT 'needs_review',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS readiness_assessments (
+      permit_record_id INTEGER PRIMARY KEY REFERENCES permit_records(id) ON DELETE CASCADE,
+      state TEXT NOT NULL,
+      target_start TEXT,
+      days_to_start INTEGER,
+      summary TEXT NOT NULL DEFAULT '',
+      outstanding_json TEXT NOT NULL DEFAULT '[]',
+      satisfied_json TEXT NOT NULL DEFAULT '[]',
+      gaps_json TEXT NOT NULL DEFAULT '[]',
+      informational_json TEXT NOT NULL DEFAULT '[]',
+      ruleset_key TEXT NOT NULL DEFAULT 'default_workbook_v1',
+      assessed_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS properties (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      site_address TEXT NOT NULL DEFAULT '',
+      city TEXT NOT NULL DEFAULT '',
+      state TEXT NOT NULL DEFAULT '',
+      zip TEXT NOT NULL DEFAULT '',
+      parcel_apn TEXT NOT NULL DEFAULT '',
+      parcel_jurisdiction TEXT NOT NULL DEFAULT '',
+      source TEXT NOT NULL DEFAULT 'manual',
+      match_state TEXT NOT NULL DEFAULT 'unmatched',
+      record_origin TEXT NOT NULL DEFAULT 'manual',
+      identity_key TEXT NOT NULL DEFAULT '',
+      notes TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS property_links (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+      lot_group_id INTEGER REFERENCES lot_groups(id) ON DELETE CASCADE,
+      permit_record_id INTEGER REFERENCES permit_records(id) ON DELETE SET NULL,
+      link_state TEXT NOT NULL DEFAULT 'candidate',
+      evidence_json TEXT NOT NULL DEFAULT '{}',
+      confirmed_by TEXT,
+      confirmed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(property_id, lot_group_id)
+    );
+
+    CREATE TABLE IF NOT EXISTS property_confirmations (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      property_id INTEGER NOT NULL REFERENCES properties(id) ON DELETE CASCADE,
+      action TEXT NOT NULL,
+      actor TEXT NOT NULL DEFAULT '',
+      detail TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS property_crosswalk_rows (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      project_code TEXT,
+      community_name TEXT,
+      lot_label TEXT,
+      housetype TEXT,
+      site_address TEXT,
+      city TEXT,
+      state TEXT,
+      zip TEXT,
+      parcel_apn TEXT,
+      parcel_jurisdiction TEXT,
+      match_status TEXT NOT NULL DEFAULT 'unmatched',
+      lot_group_id INTEGER REFERENCES lot_groups(id) ON DELETE SET NULL,
+      property_id INTEGER REFERENCES properties(id) ON DELETE SET NULL,
+      source_row INTEGER,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS contacts (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      property_id INTEGER REFERENCES properties(id) ON DELETE CASCADE,
+      permit_record_id INTEGER REFERENCES permit_records(id) ON DELETE SET NULL,
+      lot_group_id INTEGER REFERENCES lot_groups(id) ON DELETE SET NULL,
+      role TEXT NOT NULL DEFAULT 'property_owner',
+      full_name TEXT NOT NULL DEFAULT '',
+      company TEXT NOT NULL DEFAULT '',
+      phone TEXT NOT NULL DEFAULT '',
+      email TEXT NOT NULL DEFAULT '',
+      mailing_address TEXT NOT NULL DEFAULT '',
+      provider TEXT NOT NULL DEFAULT '',
+      provider_source TEXT NOT NULL DEFAULT '',
+      retrieved_at TEXT,
+      validation_state TEXT NOT NULL DEFAULT 'provider_returned',
+      status TEXT NOT NULL DEFAULT 'candidate',
+      restriction_flags_json TEXT NOT NULL DEFAULT '[]',
+      phone_candidates_json TEXT NOT NULL DEFAULT '[]',
+      email_candidates_json TEXT NOT NULL DEFAULT '[]',
+      record_origin TEXT NOT NULL DEFAULT 'manual',
+      notes TEXT NOT NULL DEFAULT '',
+      rejected_reason TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS contact_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      provider TEXT NOT NULL DEFAULT 'tracerfy',
+      mode TEXT NOT NULL DEFAULT 'local_fixture',
+      property_id INTEGER REFERENCES properties(id) ON DELETE SET NULL,
+      permit_record_id INTEGER REFERENCES permit_records(id) ON DELETE SET NULL,
+      lot_group_id INTEGER REFERENCES lot_groups(id) ON DELETE SET NULL,
+      request_fingerprint TEXT NOT NULL,
+      endpoint TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'queued',
+      estimated_credits INTEGER NOT NULL DEFAULT 0,
+      reserved_credits INTEGER NOT NULL DEFAULT 0,
+      actual_credits INTEGER NOT NULL DEFAULT 0,
+      request_json TEXT NOT NULL DEFAULT '{}',
+      response_json TEXT NOT NULL DEFAULT '{}',
+      error TEXT NOT NULL DEFAULT '',
+      external_request_id TEXT,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now')),
+      finished_at TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS milestone_waivers (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      permit_record_id INTEGER NOT NULL REFERENCES permit_records(id) ON DELETE CASCADE,
+      milestone_key TEXT NOT NULL,
+      reason TEXT NOT NULL DEFAULT '',
+      waived_by TEXT NOT NULL DEFAULT '',
+      revoked_at TEXT,
+      revoked_by TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(permit_record_id, milestone_key)
+    );
+
+    CREATE TABLE IF NOT EXISTS applicability_config (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      community_section_id INTEGER REFERENCES community_sections(id) ON DELETE CASCADE,
+      lot_group_id INTEGER REFERENCES lot_groups(id) ON DELETE CASCADE,
+      feature_key TEXT NOT NULL,
+      state TEXT NOT NULL DEFAULT 'needs_confirmation',
+      notes TEXT NOT NULL DEFAULT '',
+      updated_by TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS plan_links (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      lot_group_id INTEGER NOT NULL REFERENCES lot_groups(id) ON DELETE CASCADE,
+      plan_tracker_row_id INTEGER REFERENCES plan_tracker_rows(id) ON DELETE SET NULL,
+      product_name TEXT,
+      counties TEXT,
+      housetype TEXT,
+      link_state TEXT NOT NULL DEFAULT 'candidate',
+      evidence_json TEXT NOT NULL DEFAULT '{}',
+      confirmed_by TEXT,
+      confirmed_at TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(lot_group_id, product_name, counties, housetype)
+    );
+
+    CREATE TABLE IF NOT EXISTS provider_usage (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      provider TEXT NOT NULL,
+      mode TEXT NOT NULL,
+      endpoint TEXT NOT NULL,
+      credits INTEGER NOT NULL DEFAULT 0,
+      charge_kind TEXT NOT NULL DEFAULT 'actual',
+      job_id INTEGER REFERENCES contact_jobs(id) ON DELETE SET NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+
+  // Additive migrations for existing DBs
+  addColumn('community_sections', 'jurisdiction_source', "jurisdiction_source TEXT NOT NULL DEFAULT 'unresolved'");
+  addColumn('community_sections', 'jurisdiction_confirmed', 'jurisdiction_confirmed INTEGER NOT NULL DEFAULT 0');
+  addColumn('community_sections', 'record_origin', "record_origin TEXT NOT NULL DEFAULT 'import'");
+  addColumn('lot_groups', 'stable_key', "stable_key TEXT NOT NULL DEFAULT ''");
+  addColumn('lot_groups', 'record_origin', "record_origin TEXT NOT NULL DEFAULT 'import'");
+  addColumn('permit_records', 'jurisdiction_source', "jurisdiction_source TEXT NOT NULL DEFAULT 'unresolved'");
+  addColumn('permit_records', 'jurisdiction_confirmed', 'jurisdiction_confirmed INTEGER NOT NULL DEFAULT 0');
+  addColumn('permit_records', 'readiness_state', "readiness_state TEXT NOT NULL DEFAULT 'unknown_stale'");
+  addColumn('permit_records', 'progress_anchor_at', 'progress_anchor_at TEXT');
+  addColumn('permit_records', 'baseline_snapshot_at', 'baseline_snapshot_at TEXT');
+  addColumn('permit_records', 'record_origin', "record_origin TEXT NOT NULL DEFAULT 'import'");
+  addColumn('permit_records', 'authority_note', "authority_note TEXT NOT NULL DEFAULT ''");
+  addColumn('community_sections', 'authority_note', "authority_note TEXT NOT NULL DEFAULT ''");
+  addColumn('internal_milestones', 'source', "source TEXT NOT NULL DEFAULT 'import'");
+  addColumn('internal_milestones', 'edited_in_app', 'edited_in_app INTEGER NOT NULL DEFAULT 0');
+  addColumn('internal_milestones', 'last_import_value', 'last_import_value TEXT');
+  addColumn('official_snapshots', 'is_baseline', 'is_baseline INTEGER NOT NULL DEFAULT 0');
+  addColumn('attention_events', 'condition_key', 'condition_key TEXT');
+  addColumn('attention_events', 'resolved_at', 'resolved_at TEXT');
+  addColumn('properties', 'identity_key', "identity_key TEXT NOT NULL DEFAULT ''");
+  addColumn('contacts', 'phone_candidates_json', "phone_candidates_json TEXT NOT NULL DEFAULT '[]'");
+  addColumn('contacts', 'email_candidates_json', "email_candidates_json TEXT NOT NULL DEFAULT '[]'");
+  addColumn('contact_jobs', 'reserved_credits', 'reserved_credits INTEGER NOT NULL DEFAULT 0');
+  addColumn('provider_usage', 'charge_kind', "charge_kind TEXT NOT NULL DEFAULT 'actual'");
+  addColumn('milestone_waivers', 'revoked_at', 'revoked_at TEXT');
+  addColumn('milestone_waivers', 'revoked_by', 'revoked_by TEXT');
+  addColumn('permit_records', 'use_classification', "use_classification TEXT NOT NULL DEFAULT 'unknown'");
+  addColumn(
+    'permit_records',
+    'use_classification_official',
+    "use_classification_official TEXT NOT NULL DEFAULT 'unknown'"
+  );
+  addColumn(
+    'permit_records',
+    'use_classification_official_label',
+    "use_classification_official_label TEXT NOT NULL DEFAULT ''"
+  );
+  addColumn(
+    'permit_records',
+    'use_classification_source',
+    "use_classification_source TEXT NOT NULL DEFAULT 'unknown_default'"
+  );
+  addColumn('permit_records', 'use_classification_manual', 'use_classification_manual TEXT');
+  addColumn('permit_records', 'use_classification_manual_by', 'use_classification_manual_by TEXT');
+  addColumn('permit_records', 'use_classification_manual_at', 'use_classification_manual_at TEXT');
+  addColumn('permit_records', 'row_version', 'row_version INTEGER NOT NULL DEFAULT 1');
+  addColumn('permit_records', 'source_event_at', 'source_event_at TEXT');
+  addColumn('permit_records', 'source_publication_at', 'source_publication_at TEXT');
+  addColumn('permit_records', 'source_observed_at', 'source_observed_at TEXT');
+
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS sync_jobs (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      scope TEXT NOT NULL DEFAULT 'linked',
+      trigger TEXT NOT NULL DEFAULT 'manual',
+      status TEXT NOT NULL DEFAULT 'queued',
+      fairfax_only INTEGER NOT NULL DEFAULT 0,
+      attempts INTEGER NOT NULL DEFAULT 0,
+      max_attempts INTEGER NOT NULL DEFAULT 3,
+      lease_owner TEXT,
+      lease_until TEXT,
+      next_run_at TEXT NOT NULL DEFAULT (datetime('now')),
+      started_at TEXT,
+      finished_at TEXT,
+      summary_json TEXT DEFAULT '{}',
+      error TEXT DEFAULT '',
+      created_by TEXT DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_sync_jobs_status_next ON sync_jobs(status, next_run_at)`);
+
+  // Phase 5 — private Opportunities pipeline (workspace-local; not marketing leads)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS opportunity_searches (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      name TEXT NOT NULL,
+      criteria_json TEXT NOT NULL DEFAULT '{}',
+      kind TEXT NOT NULL DEFAULT 'dynamic',
+      last_reviewed_at TEXT,
+      created_by TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS opportunity_groups (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      label TEXT NOT NULL DEFAULT '',
+      group_kind TEXT NOT NULL DEFAULT 'company_or_project',
+      evidence_json TEXT NOT NULL DEFAULT '{}',
+      disposition TEXT NOT NULL DEFAULT 'new',
+      reason TEXT NOT NULL DEFAULT '',
+      assignee TEXT NOT NULL DEFAULT '',
+      next_action TEXT NOT NULL DEFAULT '',
+      next_action_due TEXT,
+      reviewed_link INTEGER NOT NULL DEFAULT 0,
+      link_status TEXT NOT NULL DEFAULT 'proposed',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS opportunities (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      source_key TEXT NOT NULL DEFAULT 'fairfax_county_building_records_plus',
+      jurisdiction_code TEXT NOT NULL DEFAULT 'fairfax_county',
+      official_id TEXT NOT NULL,
+      activity_summary TEXT NOT NULL DEFAULT '',
+      permit_type TEXT NOT NULL DEFAULT '',
+      official_status TEXT NOT NULL DEFAULT '',
+      source_native_status TEXT NOT NULL DEFAULT '',
+      address TEXT NOT NULL DEFAULT '',
+      city TEXT NOT NULL DEFAULT '',
+      state TEXT NOT NULL DEFAULT '',
+      zip TEXT NOT NULL DEFAULT '',
+      parcel TEXT NOT NULL DEFAULT '',
+      company_evidence TEXT NOT NULL DEFAULT '',
+      role_evidence TEXT NOT NULL DEFAULT '',
+      issued_date TEXT,
+      submitted_date TEXT,
+      approved_date TEXT,
+      source_event_at TEXT,
+      source_url TEXT NOT NULL DEFAULT '',
+      match_reasons_json TEXT NOT NULL DEFAULT '[]',
+      limitations_json TEXT NOT NULL DEFAULT '[]',
+      evidence_json TEXT NOT NULL DEFAULT '{}',
+      disposition TEXT NOT NULL DEFAULT 'new',
+      reason TEXT NOT NULL DEFAULT '',
+      assignee TEXT NOT NULL DEFAULT '',
+      next_action TEXT NOT NULL DEFAULT '',
+      next_action_due TEXT,
+      group_id INTEGER REFERENCES opportunity_groups(id) ON DELETE SET NULL,
+      linked_permit_record_id INTEGER REFERENCES permit_records(id) ON DELETE SET NULL,
+      linked_lot_group_id INTEGER REFERENCES lot_groups(id) ON DELETE SET NULL,
+      search_id INTEGER REFERENCES opportunity_searches(id) ON DELETE SET NULL,
+      dedupe_key TEXT NOT NULL UNIQUE,
+      record_origin TEXT NOT NULL DEFAULT 'discovery',
+      created_by TEXT NOT NULL DEFAULT '',
+      updated_by TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+  `);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_opp_disposition ON opportunities(disposition)`);
+  db.exec(`CREATE INDEX IF NOT EXISTS idx_opp_group ON opportunities(group_id)`);
+
+  // Phase 6 — channel suppressions + contact match evidence (fixture/sandbox only under hard spend lock)
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS contact_suppressions (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      channel TEXT NOT NULL,
+      value_normalized TEXT NOT NULL,
+      full_name TEXT NOT NULL DEFAULT '',
+      reason TEXT NOT NULL DEFAULT '',
+      scope TEXT NOT NULL DEFAULT 'workspace',
+      property_id INTEGER REFERENCES properties(id) ON DELETE CASCADE,
+      opportunity_id INTEGER REFERENCES opportunities(id) ON DELETE SET NULL,
+      property_id_key INTEGER NOT NULL DEFAULT 0,
+      created_by TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL DEFAULT (datetime('now')),
+      UNIQUE(channel, value_normalized, scope, property_id_key)
+    );
+  `);
+  addColumn('contacts', 'sought_role', "sought_role TEXT NOT NULL DEFAULT ''");
+  addColumn('contacts', 'match_evidence_json', "match_evidence_json TEXT NOT NULL DEFAULT '{}'");
+  addColumn('contacts', 'entity_kind', "entity_kind TEXT NOT NULL DEFAULT 'unknown'");
+  addColumn('contacts', 'opportunity_id', 'opportunity_id INTEGER');
+  addColumn('contact_jobs', 'sought_role', "sought_role TEXT NOT NULL DEFAULT ''");
+  addColumn('contact_jobs', 'opportunity_id', 'opportunity_id INTEGER');
+  if (!db.prepare("SELECT value FROM settings WHERE key = 'tracerfy_hard_spend_lock'").get()) {
+    db.prepare(
+      `INSERT INTO settings(key, value) VALUES ('tracerfy_hard_spend_lock', '1')
+       ON CONFLICT(key) DO NOTHING`
+    ).run();
+    // Default hard lock: production off, spend cap 0 (do not overwrite an explicit later unlock in tests)
+    db.prepare(
+      `INSERT INTO settings(key, value) VALUES ('tracerfy_production_enabled', '0')
+       ON CONFLICT(key) DO NOTHING`
+    ).run();
+    db.prepare(
+      `INSERT INTO settings(key, value) VALUES ('tracerfy_spend_limit_credits', '0')
+       ON CONFLICT(key) DO NOTHING`
+    ).run();
+  }
+
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_lot_stable ON lot_groups(stable_key) WHERE stable_key != ''`);
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_property_identity ON properties(identity_key) WHERE identity_key != ''`);
+  db.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_permit_lot_official
+      ON permit_records(lot_group_id, primary_official_id)
+      WHERE primary_official_id IS NOT NULL AND primary_official_id != ''
+  `);
+
+  if (!db.prepare("SELECT value FROM settings WHERE key = 'stale_days'").get()) {
+    db.prepare(
+      "INSERT INTO settings(key, value) VALUES ('stale_days', '14'), ('current_user', 'demo.user'), ('demo_mode', '0')"
+    ).run();
+  }
+  if (!db.prepare('SELECT id FROM schedule_config WHERE id = 1').get()) {
+    db.prepare(
+      `INSERT INTO schedule_config(id, enabled, interval_minutes, timeout_ms, max_retries, backoff_ms)
+       VALUES (1, 0, 360, 15000, 2, 2000)`
+    ).run();
+  }
+}
+
+export function getSetting(key, fallback = null) {
+  const row = db.prepare('SELECT value FROM settings WHERE key = ?').get(key);
+  return row ? row.value : fallback;
+}
+
+export function setSetting(key, value) {
+  db.prepare(
+    `INSERT INTO settings(key, value) VALUES (?, ?)
+     ON CONFLICT(key) DO UPDATE SET value = excluded.value`
+  ).run(key, String(value));
+}
+
+export function isDemoMode() {
+  return getSetting('demo_mode', '0') === '1' || process.env.PERMIT_DEMO === '1';
+}
+
+/**
+ * Invented demo-sandbox UI/API shortcuts are disposable-only.
+ * Production/RC hosts keep them off unless the owner explicitly enables demo_mode
+ * or sets ALLOW_DEMO_SHORTCUTS=1 / PERMIT_DEMO=1 / PERMIT_TEST_HARNESS=1.
+ */
+export function demoShortcutsAllowed() {
+  if (process.env.ALLOW_DEMO_SHORTCUTS === '1') return true;
+  if (process.env.PERMIT_TEST_HARNESS === '1') return true;
+  if (process.env.PERMIT_DEMO === '1') return true;
+  return getSetting('demo_mode', '0') === '1';
+}
+
+export function recordChange(permitId, field, oldValue, newValue, changedBy, source) {
+  const ov = oldValue ?? '';
+  const nv = newValue ?? '';
+  if (String(ov) === String(nv)) return false;
+  db.prepare(
+    `INSERT INTO field_changes(permit_record_id, field, old_value, new_value, changed_by, source)
+     VALUES (?, ?, ?, ?, ?, ?)`
+  ).run(permitId, field, String(ov), String(nv), changedBy, source);
+  return true;
+}
+
+export function upsertAttention(permitId, kind, message, dedupeKey, conditionKey = null) {
+  db.prepare(
+    `INSERT INTO attention_events(permit_record_id, kind, message, dedupe_key, condition_key, resolved_at, acknowledged)
+     VALUES (?, ?, ?, ?, ?, NULL, 0)
+     ON CONFLICT(dedupe_key) DO UPDATE SET
+       message = excluded.message,
+       condition_key = excluded.condition_key,
+       resolved_at = NULL,
+       acknowledged = CASE
+         WHEN attention_events.resolved_at IS NOT NULL THEN 0
+         ELSE attention_events.acknowledged
+       END`
+  ).run(permitId, kind, message, dedupeKey, conditionKey);
+}
+
+export function resolveAttentionByCondition(conditionKey) {
+  db.prepare(
+    `UPDATE attention_events SET resolved_at = datetime('now')
+     WHERE condition_key = ? AND resolved_at IS NULL`
+  ).run(conditionKey);
+}
+
+/** Resolve open source-failure Attention for a permit (all IDs). Preserves rows as history. */
+export function resolveSourceAttentionForPermit(permitId) {
+  db.prepare(
+    `UPDATE attention_events SET resolved_at = datetime('now')
+     WHERE permit_record_id = ?
+       AND kind IN ('source_missing', 'check_failed')
+       AND resolved_at IS NULL`
+  ).run(Number(permitId));
+}
+
+/** Resolve condition keys matching prefix (e.g. source:12:). */
+export function resolveAttentionByConditionPrefix(prefix) {
+  if (!prefix) return;
+  db.prepare(
+    `UPDATE attention_events SET resolved_at = datetime('now')
+     WHERE resolved_at IS NULL AND condition_key LIKE ?`
+  ).run(`${prefix}%`);
+}
+
+migrate();
